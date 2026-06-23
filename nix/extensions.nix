@@ -111,8 +111,12 @@ rec {
             [ -d "$ext_dir" ] || continue
             ext_name="$(basename "$ext_dir")"
             target="$TARGET_DIR/$ext_name"
-            rm -rf "$target" 2>/dev/null || true
+            if [ -d "$target" ]; then
+              chmod -R u+w "$target"
+              rm -rf "$target"
+            fi
             cp -r "$ext_dir" "$target"
+            chmod -R u+w "$target"
             chown -R "${user}:${group}" "$target" 2>/dev/null || true
           done
         fi
