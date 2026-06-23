@@ -30,7 +30,7 @@ let
     DATA_DIR="${cfg.dataDir}"
 
     if [ -d "$DATA_DIR" ]; then
-      for userdir in "$DATA_DIR"/*/; do
+      for userdir in "$DATA_DIR"/data/*/; do
         [ -d "$userdir" ] || continue
         preset_dir="$userdir/TextGen Settings"
         mkdir -p "$preset_dir"
@@ -73,7 +73,7 @@ let
     DATA_DIR="${cfg.dataDir}"
 
     if [ -d "$DATA_DIR" ]; then
-      for userdir in "$DATA_DIR"/*/; do
+      for userdir in "$DATA_DIR"/data/*/; do
         settings_file="$userdir/settings.json"
         [ -f "$settings_file" ] || continue
         ${lib.optionalString (defaultProfileUuid != "") ''
@@ -139,7 +139,7 @@ let
     DATA_DIR="${cfg.dataDir}"
 
     if [ -d "$DATA_DIR" ]; then
-      for userdir in "$DATA_DIR"/*/; do
+      for userdir in "$DATA_DIR"/data/*/; do
         settings_file="$userdir/settings.json"
         [ -f "$settings_file" ] || continue
         ${pkgs.jq}/bin/jq \
@@ -187,7 +187,7 @@ let
     set -e
     DATA_DIR="${cfg.dataDir}"
     if [ -d "$DATA_DIR" ]; then
-      for userdir in "$DATA_DIR"/*/; do
+      for userdir in "$DATA_DIR"/data/*/; do
         settings_file="$userdir/settings.json"
         [ -f "$settings_file" ] || continue
         SETTINGS='${builtins.toJSON cfg.extraExtensionSettings}'

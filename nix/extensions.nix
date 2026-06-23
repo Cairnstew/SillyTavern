@@ -124,7 +124,7 @@ rec {
 
       # Apply extension enable/disable and settings
       if [ -d "$DATA_DIR" ]; then
-        for userdir in "$DATA_DIR"/*/; do
+        for userdir in "$DATA_DIR"/data/*/; do
           settings_file="$userdir/settings.json"
           [ -f "$settings_file" ] || continue
 

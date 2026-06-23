@@ -391,7 +391,7 @@ rec {
         local src_dir="$1"
         local target_subdir="$2"
         [ -d "$src_dir" ] || return 0
-        for userdir in "$DATA_DIR"/*/; do
+        for userdir in "$DATA_DIR"/data/*/; do
           [ -d "$userdir" ] || continue
           target_dir="$userdir/$target_subdir"
           mkdir -p "$target_dir"
@@ -428,7 +428,7 @@ rec {
         copy_presets "${reaDir}" "reasoning"
       ''}
 
-      for userdir in "$DATA_DIR"/*/; do
+      for userdir in "$DATA_DIR"/data/*/; do
         settings_file="$userdir/settings.json"
         [ -f "$settings_file" ] || continue
 

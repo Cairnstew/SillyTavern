@@ -61,7 +61,7 @@ in
         exit 0
       fi
 
-      for userdir in "$DATA_DIR"/*/; do
+      for userdir in "$DATA_DIR"/data/*/; do
         [ -d "$userdir" ] || continue
         USER_DIR="$userdir"
 
