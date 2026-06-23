@@ -429,7 +429,7 @@ in
     };
 
     sessionTimeout = lib.mkOption {
-      type = lib.types.ints.signed;
+      type = lib.types.int;
       default = -1;
       example = 86400;
       description = "User session timeout in seconds.";
@@ -461,7 +461,7 @@ in
           };
 
           port = lib.mkOption {
-            type = lib.types.ints.signed;
+            type = lib.types.int;
             default = -1;
             example = 8000;
             description = "Override the browser launch port. -1 uses server port.";

@@ -449,7 +449,7 @@ in
     };
 
     sessionTimeout = lib.mkOption {
-      type = lib.types.ints.signed;
+      type = lib.types.int;
       default = -1;
       example = 86400;
       description = ''
@@ -486,7 +486,7 @@ in
           };
 
           port = lib.mkOption {
-            type = lib.types.ints.signed;
+            type = lib.types.int;
             default = -1;
             example = 8000;
             description = "Override the port for browser launch. -1 uses server port.";

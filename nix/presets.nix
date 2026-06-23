@@ -54,7 +54,7 @@ rec {
       skew = lib.mkOption { type = types.float; default = 0; };
       do_sample = lib.mkOption { type = types.bool; default = true; };
       early_stopping = lib.mkOption { type = types.bool; default = false; };
-      seed = lib.mkOption { type = types.ints.signed; default = -1; };
+      seed = lib.mkOption { type = types.int; default = -1; };
       max_tokens_second = lib.mkOption { type = types.ints.unsigned; default = 0; };
 
       # --- Dynamic temperature ---

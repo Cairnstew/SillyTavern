@@ -517,7 +517,7 @@ rec {
 
       # --- Tokenizer ---
       tokenizer = lib.mkOption {
-        type = types.ints.signed;
+        type = types.int;
         default = 99;
         description = "Tokenizer: 99=BEST_MATCH, or a specific tokenizer ID.";
       };
