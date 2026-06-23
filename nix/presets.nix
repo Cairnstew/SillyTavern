@@ -33,25 +33,25 @@ rec {
       temperature_last = lib.mkOption { type = types.bool; default = true; };
       top_p = lib.mkOption { type = types.float; default = 0.95; };
       top_k = lib.mkOption { type = types.ints.unsigned; default = 0; };
-      top_a = lib.mkOption { type = types.float; default = 0; };
-      tfs = lib.mkOption { type = types.float; default = 1; };
-      epsilon_cutoff = lib.mkOption { type = types.float; default = 0; };
-      eta_cutoff = lib.mkOption { type = types.float; default = 0; };
-      typical_p = lib.mkOption { type = types.float; default = 1; };
+      top_a = lib.mkOption { type = types.float; default = 0.0; };
+      tfs = lib.mkOption { type = types.float; default = 1.0; };
+      epsilon_cutoff = lib.mkOption { type = types.float; default = 0.0; };
+      eta_cutoff = lib.mkOption { type = types.float; default = 0.0; };
+      typical_p = lib.mkOption { type = types.float; default = 1.0; };
       min_p = lib.mkOption { type = types.float; default = 0.01; };
       rep_pen = lib.mkOption { type = types.float; default = 1.1; };
       rep_pen_range = lib.mkOption { type = types.ints.unsigned; default = 0; };
       rep_pen_decay = lib.mkOption { type = types.ints.unsigned; default = 0; };
-      rep_pen_slope = lib.mkOption { type = types.float; default = 1; };
+      rep_pen_slope = lib.mkOption { type = types.float; default = 1.0; };
       no_repeat_ngram_size = lib.mkOption { type = types.ints.unsigned; default = 0; };
-      penalty_alpha = lib.mkOption { type = types.float; default = 0; };
+      penalty_alpha = lib.mkOption { type = types.float; default = 0.0; };
       num_beams = lib.mkOption { type = types.ints.unsigned; default = 1; };
-      length_penalty = lib.mkOption { type = types.float; default = 1; };
+      length_penalty = lib.mkOption { type = types.float; default = 1.0; };
       min_length = lib.mkOption { type = types.ints.unsigned; default = 0; };
-      encoder_rep_pen = lib.mkOption { type = types.float; default = 1; };
-      freq_pen = lib.mkOption { type = types.float; default = 0; };
-      presence_pen = lib.mkOption { type = types.float; default = 0; };
-      skew = lib.mkOption { type = types.float; default = 0; };
+      encoder_rep_pen = lib.mkOption { type = types.float; default = 1.0; };
+      freq_pen = lib.mkOption { type = types.float; default = 0.0; };
+      presence_pen = lib.mkOption { type = types.float; default = 0.0; };
+      skew = lib.mkOption { type = types.float; default = 0.0; };
       do_sample = lib.mkOption { type = types.bool; default = true; };
       early_stopping = lib.mkOption { type = types.bool; default = false; };
       seed = lib.mkOption { type = types.int; default = -1; };
@@ -59,17 +59,17 @@ rec {
 
       # --- Dynamic temperature ---
       dynatemp = lib.mkOption { type = types.bool; default = false; };
-      min_temp = lib.mkOption { type = types.float; default = 0; };
-      max_temp = lib.mkOption { type = types.float; default = 2; };
-      dynatemp_exponent = lib.mkOption { type = types.float; default = 1; };
+      min_temp = lib.mkOption { type = types.float; default = 0.0; };
+      max_temp = lib.mkOption { type = types.float; default = 2.0; };
+      dynatemp_exponent = lib.mkOption { type = types.float; default = 1.0; };
 
       # --- Smoothing ---
-      smoothing_factor = lib.mkOption { type = types.float; default = 0; };
-      smoothing_curve = lib.mkOption { type = types.float; default = 1; };
+      smoothing_factor = lib.mkOption { type = types.float; default = 0.0; };
+      smoothing_curve = lib.mkOption { type = types.float; default = 1.0; };
 
       # --- DRY penalty ---
       dry_allowed_length = lib.mkOption { type = types.ints.unsigned; default = 2; };
-      dry_multiplier = lib.mkOption { type = types.float; default = 0; };
+      dry_multiplier = lib.mkOption { type = types.float; default = 0.0; };
       dry_base = lib.mkOption { type = types.float; default = 1.75; };
       dry_sequence_breakers = lib.mkOption { type = types.str; default = ''["\n", ":", "\"", "*"]''; };
       dry_penalty_last_n = lib.mkOption { type = types.ints.unsigned; default = 0; };
@@ -83,11 +83,11 @@ rec {
 
       # --- Mirostat ---
       mirostat_mode = lib.mkOption { type = types.ints.unsigned; default = 0; };
-      mirostat_tau = lib.mkOption { type = types.float; default = 5; };
+      mirostat_tau = lib.mkOption { type = types.float; default = 5.0; };
       mirostat_eta = lib.mkOption { type = types.float; default = 0.1; };
 
       # --- CFG ---
-      guidance_scale = lib.mkOption { type = types.float; default = 1; };
+      guidance_scale = lib.mkOption { type = types.float; default = 1.0; };
       negative_prompt = lib.mkOption { type = types.str; default = ""; };
 
       # --- Grammar / JSON schema ---
@@ -133,7 +133,7 @@ rec {
 
       # --- XTC sampler ---
       xtc_threshold = lib.mkOption { type = types.float; default = 0.1; };
-      xtc_probability = lib.mkOption { type = types.float; default = 0; };
+      xtc_probability = lib.mkOption { type = types.float; default = 0.0; };
 
       # --- Other ---
       nsigma = lib.mkOption { type = types.ints.unsigned; default = 0; };
@@ -148,8 +148,8 @@ rec {
       bypass_status_check = lib.mkOption { type = types.bool; default = false; };
       openrouter_allow_fallbacks = lib.mkOption { type = types.bool; default = false; };
       generic_model = lib.mkOption { type = types.str; default = ""; };
-      adaptive_target = lib.mkOption { type = types.float; default = 0; };
-      adaptive_decay = lib.mkOption { type = types.float; default = 0; };
+      adaptive_target = lib.mkOption { type = types.float; default = 0.0; };
+      adaptive_decay = lib.mkOption { type = types.float; default = 0.0; };
       extensions = lib.mkOption {
         type = types.attrs;
         default = { };
