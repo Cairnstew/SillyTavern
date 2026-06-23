@@ -89,7 +89,7 @@ rec {
       paths = dirs;
     };
 
-  mkExtensionsSetupScript = { dataDir, user, group, extensions, extSourceDir }:
+  mkExtensionsSetupScript = { dataDir, user, group, extensions, extSourceDir, thirdPartyDir ? (toString pkgs.path) + "/public/scripts/extensions/third-party" }:
     let
       enabled = lib.filterAttrs (_: v: v.enable) extensions;
       disabledNames = lib.attrNames (lib.filterAttrs (n: v: !v.enable) extensions);
@@ -102,7 +102,7 @@ rec {
 
       # Copy extension sources to third-party directory
       ${lib.optionalString (extSourceDir != "") ''
-        TARGET_DIR="${toString pkgs.path}/public/scripts/extensions/third-party"
+        TARGET_DIR="${thirdPartyDir}"
         # prettier-ignore
         if [ -d "$EXT_SRC" ] && [ "$(ls -A "$EXT_SRC")" ]; then
           mkdir -p "$TARGET_DIR"

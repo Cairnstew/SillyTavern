@@ -163,6 +163,7 @@ let
     group = cfg.group;
     extensions = cfg.declaredExtensions;
     extSourceDir = "${extSourceDir}";
+    thirdPartyDir = "${cfg.package}/lib/node_modules/sillytavern/public/scripts/extensions/third-party";
   };
 
   extensionsConfigured = cfg.declaredExtensions != { };
@@ -179,8 +180,29 @@ let
   };
 
   contentConfigured = cfg.declaredCharacters != { } || cfg.declaredLorebooks != { };
+
+  extraExtSettingsConfigured = cfg.extraExtensionSettings != { };
+
+  setupExtraExtSettingsScript = pkgs.writeShellScript "sillytavern-setup-extra-ext-settings" ''
+    set -e
+    DATA_DIR="${cfg.dataDir}"
+    if [ -d "$DATA_DIR" ]; then
+      for userdir in "$DATA_DIR"/*/; do
+        settings_file="$userdir/settings.json"
+        [ -f "$settings_file" ] || continue
+        SETTINGS='${builtins.toJSON cfg.extraExtensionSettings}'
+        ${pkgs.jq}/bin/jq \
+          --argjson s "$SETTINGS" \
+          '.extension_settings = (.extension_settings // {}) * $s' \
+          "$settings_file" > "$settings_file.tmp" && \
+        mv "$settings_file.tmp" "$settings_file"
+      done
+    fi
+  '';
 in
 {
+  disabledModules = [ "services/web-apps/sillytavern.nix" ];
+
   meta.maintainers = with lib.maintainers; [ ];
 
   options.services.sillytavern = {
@@ -811,6 +833,24 @@ in
       '';
     };
 
+    # --- Extra Extension Settings ---
+
+    extraExtensionSettings = lib.mkOption {
+      type = lib.types.attrs;
+      default = { };
+      example = {
+        openai.prompts = [ "Hello" "World" ];
+        regex.extraPatterns = [ ];
+      };
+      description = ''
+        Arbitrary extension_settings paths to inject into settings.json.
+        Unlike `declaredExtensions.<name>.settings`, this option allows
+        setting any nested path under extension_settings without requiring
+        a matching declared extension entry.
+        These are deep-merged on each service start.
+      '';
+    };
+
     # --- Declared Characters ---
 
     declaredCharacters = lib.mkOption {
@@ -895,6 +935,9 @@ in
           ]
           ++ lib.optionals extensionsConfigured [
             "${setupExtensionsScript}"
+          ]
+          ++ lib.optionals extraExtSettingsConfigured [
+            "${setupExtraExtSettingsScript}"
           ]
           ++ lib.optionals contentConfigured [
             "${setupContentScript}"
