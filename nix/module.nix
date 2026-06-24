@@ -8,7 +8,7 @@ let
 
   setupConfigScript = pkgs.writeShellScript "sillytavern-setup-config" ''
     set -e
-    cp -f ${configYaml.generateConfigYaml cfg}/sillytavern-config.yaml ${cfg.dataDir}/config.yaml
+    cp -f ${configYaml.generateConfigYaml cfg} ${cfg.dataDir}/config.yaml
     chown ${cfg.user}:${cfg.group} ${cfg.dataDir}/config.yaml 2>/dev/null || true
   '';
 
