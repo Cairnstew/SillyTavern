@@ -970,7 +970,7 @@ in
         ProtectKernelModules = true;
         ProtectKernelTunables = true;
         ProtectProc = "invisible";
-        ProtectSystem = "strict";
+        ProtectSystem = "full";
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
         RestrictNamespaces = true;
         RestrictRealtime = true;
