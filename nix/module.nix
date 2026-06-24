@@ -5,6 +5,13 @@ let
   defaultUser = "sillytavern";
   defaultGroup = "sillytavern";
   configYaml = import ./config-yaml.nix { inherit lib pkgs; };
+
+  setupConfigScript = pkgs.writeShellScript "sillytavern-setup-config" ''
+    set -e
+    cp -f ${configYaml.generateConfigYaml cfg}/sillytavern-config.yaml ${cfg.dataDir}/config.yaml
+    chown ${cfg.user}:${cfg.group} ${cfg.dataDir}/config.yaml 2>/dev/null || true
+  '';
+
   presetsModule = import ./presets.nix { inherit lib pkgs; };
 
   mkPresetJson = preset:
@@ -913,9 +920,6 @@ in
     # ---- Package ----
     environment.systemPackages = [ cfg.package ];
 
-    # ---- Generated config ----
-    environment.etc."sillytavern/config.yaml".source = configYaml.generateConfigYaml cfg;
-
     # ---- Service ----
     systemd.services.sillytavern = {
       description = "SillyTavern LLM Frontend";
@@ -927,7 +931,7 @@ in
       serviceConfig = {
         Type = "simple";
         ExecStartPre =
-          [ "${pkgs.coreutils}/bin/mkdir -p ${cfg.dataDir}" "${setupPresetsScript}" ]
+          [ "${pkgs.coreutils}/bin/mkdir -p ${cfg.dataDir}" "${setupConfigScript}" "${setupPresetsScript}" ]
           ++ lib.optionals (cfg.connectionProfiles != { }) [
             "${setupConnectionProfilesScript}"
           ]
@@ -947,7 +951,7 @@ in
             "${setupContentScript}"
           ];
         ExecStart = ''
-          ${lib.getExe cfg.package} --configPath /etc/sillytavern/config.yaml
+          ${lib.getExe cfg.package} --configPath ${cfg.dataDir}/config.yaml
         '';
         User = cfg.user;
         Group = cfg.group;
