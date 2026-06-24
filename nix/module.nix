@@ -32,7 +32,7 @@ let
     if [ -d "$DATA_DIR" ]; then
       for userdir in "$DATA_DIR"/data/*/; do
         [ -d "$userdir" ] || continue
-        case "${userdir##*/}" in _*) continue;; esac
+        case "''${userdir##*/}" in _*) continue;; esac
         preset_dir="$userdir/TextGen Settings"
         mkdir -p "$preset_dir"
         for preset_file in "$PRESET_SRC"/*.json; do
@@ -75,7 +75,7 @@ let
 
     if [ -d "$DATA_DIR" ]; then
       for userdir in "$DATA_DIR"/data/*/; do
-        case "${userdir##*/}" in _*) continue;; esac
+        case "''${userdir##*/}" in _*) continue;; esac
         settings_file="$userdir/settings.json"
         [ -f "$settings_file" ] || continue
         ${lib.optionalString (defaultProfileUuid != "") ''
@@ -142,7 +142,7 @@ let
 
     if [ -d "$DATA_DIR" ]; then
       for userdir in "$DATA_DIR"/data/*/; do
-        case "${userdir##*/}" in _*) continue;; esac
+        case "''${userdir##*/}" in _*) continue;; esac
         settings_file="$userdir/settings.json"
         [ -f "$settings_file" ] || continue
         ${pkgs.jq}/bin/jq \
@@ -191,7 +191,7 @@ let
     DATA_DIR="${cfg.dataDir}"
     if [ -d "$DATA_DIR" ]; then
       for userdir in "$DATA_DIR"/data/*/; do
-        case "${userdir##*/}" in _*) continue;; esac
+        case "''${userdir##*/}" in _*) continue;; esac
         settings_file="$userdir/settings.json"
         [ -f "$settings_file" ] || continue
         SETTINGS='${builtins.toJSON cfg.extraExtensionSettings}'

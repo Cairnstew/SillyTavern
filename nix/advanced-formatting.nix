@@ -393,7 +393,7 @@ rec {
         [ -d "$src_dir" ] || return 0
         for userdir in "$DATA_DIR"/data/*/; do
           [ -d "$userdir" ] || continue
-          case "${userdir##*/}" in _*) continue;; esac
+          case "''${userdir##*/}" in _*) continue;; esac
           target_dir="$userdir/$target_subdir"
           mkdir -p "$target_dir"
           for preset_file in "$src_dir"/*.json; do
@@ -430,7 +430,7 @@ rec {
       ''}
 
       for userdir in "$DATA_DIR"/data/*/; do
-        case "${userdir##*/}" in _*) continue;; esac
+        case "''${userdir##*/}" in _*) continue;; esac
         settings_file="$userdir/settings.json"
         [ -f "$settings_file" ] || continue
 
