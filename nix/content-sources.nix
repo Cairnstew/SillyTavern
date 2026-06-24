@@ -63,6 +63,7 @@ in
 
       for userdir in "$DATA_DIR"/data/*/; do
         [ -d "$userdir" ] || continue
+        case "${userdir##*/}" in _*) continue;; esac
         USER_DIR="$userdir"
 
         ${lib.optionalString (characters != { }) ''

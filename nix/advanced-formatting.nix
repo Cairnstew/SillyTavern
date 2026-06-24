@@ -393,11 +393,12 @@ rec {
         [ -d "$src_dir" ] || return 0
         for userdir in "$DATA_DIR"/data/*/; do
           [ -d "$userdir" ] || continue
+          case "${userdir##*/}" in _*) continue;; esac
           target_dir="$userdir/$target_subdir"
           mkdir -p "$target_dir"
           for preset_file in "$src_dir"/*.json; do
             [ -f "$preset_file" ] || continue
-            cp "$preset_file" "$target_dir/$(basename "$preset_file")"
+            cp -f "$preset_file" "$target_dir/$(basename "$preset_file")"
           done
           chown -R "${user}:${group}" "$target_dir" 2>/dev/null || true
         done
@@ -429,6 +430,7 @@ rec {
       ''}
 
       for userdir in "$DATA_DIR"/data/*/; do
+        case "${userdir##*/}" in _*) continue;; esac
         settings_file="$userdir/settings.json"
         [ -f "$settings_file" ] || continue
 
