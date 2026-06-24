@@ -555,9 +555,22 @@ export function toAvatarKey(handle) {
  */
 export async function initUserStorage(dataRoot) {
     console.log('Using data root:', color.green(dataRoot));
+
+    // Remove any subdirectories in _storage that would cause node-persist to crash with EISDIR
+    const storageDir = path.join(dataRoot, '_storage');
+    if (fs.existsSync(storageDir)) {
+        const entries = fs.readdirSync(storageDir);
+        for (const entry of entries) {
+            const fullPath = path.join(storageDir, entry);
+            if (entry[0] !== '.' && fs.statSync(fullPath).isDirectory()) {
+                fs.rmSync(fullPath, { recursive: true, force: true });
+            }
+        }
+    }
+
     await storage.init({
-        dir: path.join(dataRoot, '_storage'),
-        ttl: false, // Never expire
+        dir: storageDir,
+        ttl: false,
         expiredInterval: 0,
     });
 

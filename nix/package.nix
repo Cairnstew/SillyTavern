@@ -7,6 +7,13 @@ buildNpmPackage {
   dontNpmBuild = true;
 
   postInstall = ''
+    # Patch node-persist to skip subdirectories in readDirectory (EISDIR fix)
+    patchFile="$out/lib/node_modules/sillytavern/node_modules/node-persist/src/local-storage.js"
+    if [ -f "$patchFile" ]; then
+        substituteInPlace "$patchFile" \
+            --replace-fail "if (currentFile[0] !== '.') {" "if (currentFile[0] !== '.' && fs.statSync(path.join(this.options.dir, currentFile)).isFile()) {"
+    fi
+
     mkdir -p $out/lib/node_modules/sillytavern/{backups,public/scripts/extensions/third-party}
   '';
 
