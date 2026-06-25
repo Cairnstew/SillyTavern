@@ -307,7 +307,7 @@ rec {
     // lib.optionalAttrs (preset.story_string_position != 0) { story_string_position = preset.story_string_position; }
     // lib.optionalAttrs (preset.story_string_depth != 1) { story_string_depth = preset.story_string_depth; }
     // lib.optionalAttrs (preset.story_string_role != 0) { story_string_role = preset.story_string_role; }
-    // lib.optionalAttrs (preset.always_force_name2 != false) { always_force_name2 = preset.always_force_name2; }
+    // { always_force_name2 = preset.always_force_name2; }
     // lib.optionalAttrs (preset.trim_sentences != false) { trim_sentences = preset.trim_sentences; }
     // lib.optionalAttrs (preset.single_line != false) { single_line = preset.single_line; };
 
@@ -329,7 +329,7 @@ rec {
     // lib.optionalAttrs (preset.stop_sequence != "") { stop_sequence = preset.stop_sequence; }
     // lib.optionalAttrs (preset.wrap != true) { wrap = preset.wrap; }
     // lib.optionalAttrs (preset.macro != true) { macro = preset.macro; }
-    // lib.optionalAttrs (preset.names_behavior != "none") { names_behavior = preset.names_behavior; }
+    // { names_behavior = preset.names_behavior; }
     // lib.optionalAttrs (preset.activation_regex != "") { activation_regex = preset.activation_regex; }
     // lib.optionalAttrs (preset.bind_to_context != false) { bind_to_context = preset.bind_to_context; }
     // lib.optionalAttrs (preset.user_alignment_message != "") { user_alignment_message = preset.user_alignment_message; }
