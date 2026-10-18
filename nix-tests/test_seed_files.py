@@ -428,6 +428,97 @@ class SecretsTests(unittest.TestCase):
         self.assertIn("api_key_openai", self.secrets_json())
 
 
+class PerEntryOverridesTests(unittest.TestCase):
+    """`policy` and `mode` on a single entry — used by `_css/user.css`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.stats = {"written": 0, "skipped": 0}
+        self.src = self.root / "in.css"
+        self.src.write_text("body { color: red; }\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def seed(self, content, policy="missing"):
+        return seeder.seed_file(str(self.root), "_css/user.css", content, policy, False, self.stats)
+
+    # ── mode ──────────────────────────────────────────────────────────────────
+
+    def test_default_mode_is_owner_only(self):
+        self.seed({"path": str(self.src)})
+        self.assertEqual((self.root / "_css/user.css").stat().st_mode & 0o777, 0o600)
+
+    def test_mode_overrides_the_default(self):
+        # `_css/user.css` is handed to every visitor by `res.sendFile`; 0600
+        # would be wrong there even though it is right for settings.json.
+        self.seed({"path": str(self.src), "mode": "0644"})
+        self.assertEqual((self.root / "_css/user.css").stat().st_mode & 0o777, 0o644)
+
+    def test_mode_is_parsed_as_octal(self):
+        # 0o0640 vs the decimal reading of the same four characters (0o1130)
+        # differ, so this catches a decimal parse.
+        seeder.seed_file(str(self.root), "x.css", {"path": str(self.src), "mode": "0640"}, "missing", False, self.stats)
+        self.assertEqual((self.root / "x.css").stat().st_mode & 0o777, 0o640)
+
+    def test_rejects_a_bad_mode(self):
+        for bad in ("644", "0999", 6440, "abc", "0o644"):
+            with self.subTest(mode=bad):
+                with self.assertRaises(seeder.SeedError):
+                    seeder.seed_file(str(self.root), "y.css", {"path": str(self.src), "mode": bad}, "missing", False, self.stats)
+
+    def test_mode_applies_on_overwrite_too(self):
+        self.seed({"path": str(self.src), "mode": "0644"})
+        os.chmod(self.root / "_css/user.css", 0o600)  # simulate a tampered mode
+        self.src.write_text("body { color: blue; }\n")
+        self.seed({"path": str(self.src), "mode": "0644"}, policy="overwrite")
+        self.assertEqual((self.root / "_css/user.css").stat().st_mode & 0o777, 0o644)
+
+    # ── policy ────────────────────────────────────────────────────────────────
+
+    def test_policy_overwrite_ignores_the_cli_default(self):
+        # This is the whole reason the override exists: seedPolicy defaults to
+        # "missing", which would freeze the first CSS version in place.
+        self.seed({"path": str(self.src), "policy": "overwrite"})
+        self.src.write_text("body { color: blue; }\n")
+        self.seed({"path": str(self.src), "policy": "overwrite"})
+        self.assertEqual((self.root / "_css/user.css").read_text(), "body { color: blue; }\n")
+        self.assertEqual(self.stats["written"], 2)
+
+    def test_missing_entry_honours_the_cli_default(self):
+        self.seed({"path": str(self.src)})
+        self.src.write_text("changed\n")
+        self.seed({"path": str(self.src)})
+        self.assertEqual((self.root / "_css/user.css").read_text(), "body { color: red; }\n")
+        self.assertEqual(self.stats["skipped"], 1)
+
+    def test_entry_policy_overwrite_works_under_a_missing_cli_default(self):
+        # The module's actual configuration: seedPolicy="missing" globally,
+        # policy="overwrite" on the one file that needs it.
+        self.seed({"path": str(self.src), "policy": "overwrite"}, policy="missing")
+        self.src.write_text("v2\n")
+        self.seed({"path": str(self.src), "policy": "overwrite"}, policy="missing")
+        self.assertEqual((self.root / "_css/user.css").read_text(), "v2\n")
+
+    def test_rejects_a_bad_policy(self):
+        with self.assertRaises(seeder.SeedError):
+            self.seed({"path": str(self.src), "policy": "always"})
+
+    def test_overrides_survive_the_full_spec(self):
+        spec = {
+            "dataRootFiles": {
+                "_css/user.css": {"path": str(self.src), "policy": "overwrite", "mode": "0644"}
+            }
+        }
+        seeder.apply_spec(spec, str(self.root), "missing", False)
+        target = self.root / "_css/user.css"
+        self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+        self.src.write_text("v2\n")
+        seeder.apply_spec(spec, str(self.root), "missing", False)
+        self.assertEqual(target.read_text(), "v2\n")
+
+
 class CliTests(unittest.TestCase):
     """End-to-end through main(), which is what the preStart script runs."""
 

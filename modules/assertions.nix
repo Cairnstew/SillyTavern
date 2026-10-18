@@ -20,7 +20,7 @@
 
 let
   cfg = config.services.sillytavern-nixos;
-  inherit (cfg.internal) effectiveConfig secretEnvFiles secretEnvValues;
+  inherit (cfg.internal) effectiveConfig secretEnvFiles secretEnvValues seedSpecJson;
 
   # `default-user` is created by the server itself on first start, so it is a
   # legitimate seed target without being a declared account.
@@ -118,6 +118,55 @@ in
         For agenix this is `config.age.secrets.<name>.path`, which exists only
         once the age identity file is readable — check `age.secrets.age.identity
         .path` exists, or decrypt once with `agenix -d`.
+      '';
+    }
+
+    {
+      # `dataRootFiles` and the per-user `files` maps must never name the same
+      # path. That overlap is what the original bug was: `files.common` was
+      # listed in BOTH, so every file was seeded twice and stray top-level
+      # directories appeared in the data root that SillyTavern never reads.
+      #
+      # `dataRootFiles` is now fed from `customCss` alone with a literal key, so
+      # this should be structurally impossible — which is exactly why it is
+      # worth asserting rather than trusting. A future edit that feeds
+      # `files.common` here again fails at EVAL time, not at activation.
+      assertion =
+        let
+          rootPaths = lib.attrNames seedSpecJson.dataRootFiles;
+          # Per-user files are relative to the ACCOUNT directory, so a collision
+          # is only real when the data-root path ends with a per-account path.
+          perUser = lib.concatLists (
+            lib.attrValues (lib.mapAttrs (_h: lib.attrNames) seedSpecJson.users)
+          );
+        in
+        builtins.all (p: !(lib.elem p perUser)) rootPaths;
+      message = ''
+        services.sillytavern-nixos: a path is declared both as a data-root file
+        and as a per-account file.
+
+        Data-root: ${lib.concatStringsSep ", " (lib.attrNames seedSpecJson.dataRootFiles)}
+
+        `dataRootFiles` and per-account `files` must not overlap. A path seeded
+        into both is written twice per activation, and the data-root copy lands
+        in a directory SillyTavern never reads. This map is fed from
+        `customCss` alone precisely so that no configuration can reintroduce it.
+      '';
+    }
+    {
+      # `_css/user.css` is served to every visitor by `userCssMiddleware`, so it
+      # must not be owner-only like `settings.json` (0600) — that is fine for a
+      # secret-bearing file read by the service account, but this one is read
+      # through `res.sendFile` as another user.
+      assertion = lib.all (p: (seedSpecJson.dataRootFiles.${p}.mode or null) == "0644")
+        (lib.attrNames seedSpecJson.dataRootFiles);
+      message = ''
+        services.sillytavern-nixos: data-root files must be mode 0644, not the
+        owner-only default.
+
+        `st_seed_files.py` defaults every seeded file to 0600 because most of
+        them may hold a key. `_css/user.css` is served unauthenticated to every
+        visitor, so it has to be world-readable.
       '';
     }
 

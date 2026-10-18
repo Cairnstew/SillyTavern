@@ -491,6 +491,52 @@ rec {
       touch "$out"
     '';
 
+  # `customCss` is the only thing this module ever writes at the data root, and
+  # its isolation is the whole point: `dataRootFiles` and the per-user `files`
+  # maps must never overlap, because that overlap was the original
+  # double-seeding bug.
+  #
+  # Asserted at eval time on `internal.seedSpecJson`.
+  customCssIsolated =
+    pkgs:
+    let
+      specOf = module: (evalSystem pkgs module).config.services.sillytavern-nixos.internal.seedSpecJson;
+
+      # unset: the module must not touch the data root at all.
+      unset = specOf { services.sillytavern-nixos.enable = true; };
+      cssFile = pkgs.writeText "ui-overrides.css" "body { --accent: #f00; }\n";
+      set = specOf {
+        services.sillytavern-nixos = {
+          enable = true;
+          customCss = cssFile;
+          # A per-account file, to prove the two maps stay disjoint.
+          files.common."themes/T.json".json = { palette = { }; };
+        };
+      };
+    in
+    # Unset means dataRootFiles is EMPTY — not "one key with no value". An
+    # unset option that still produced a key would resurrect the migration path
+    # this module is explicitly not supposed to own.
+    assert unset.dataRootFiles == { };
+
+    # Set means EXACTLY one key, with a literal name.
+    assert lib.attrNames set.dataRootFiles == [ "_css/user.css" ];
+
+    # Nix-authoritative and browser-readable, both explicit in the spec so the
+    # seeder never has to guess.
+    assert set.dataRootFiles."_css/user.css".policy == "overwrite";
+    assert set.dataRootFiles."_css/user.css".mode == "0644";
+
+    # The key never appears per-account. This is the double-seeding bug, stated
+    # as an assertion.
+    assert lib.all (h: !(builtins.elem "_css/user.css" (lib.attrNames set.users.${h}.files)))
+      (lib.attrNames set.users);
+
+    pkgs.runCommand "sillytavern-check-custom-css-isolated" { } ''
+      echo "PASS custom-css-isolated (unset -> {}; set -> _css/user.css only, overwrite, 0644)"
+      touch "$out"
+    '';
+
   checks =
     pkgs:
     {
@@ -500,6 +546,7 @@ rec {
       secretsExcluded = secretsExcluded pkgs;
       assertionsAreWired = assertionsAreWired pkgs;
       seedSpecCoversCommon = seedSpecCoversCommon pkgs;
+      customCssIsolated = customCssIsolated pkgs;
       seeder = seeder pkgs;
     };
 

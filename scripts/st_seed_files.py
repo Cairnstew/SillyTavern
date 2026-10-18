@@ -28,7 +28,14 @@ instead of from clicking. It is deliberately narrow:
 Spec format (JSON):
 
     {
-      "dataRootFiles": { "<rel path>": {"json": <any>} | {"path": "/nix/store/…"} },
+      "dataRootFiles": {
+        "<rel path>": {
+          "json": <any>, "path": "/nix/store/…",
+          # Optional per-file overrides:
+          #   "policy": "overwrite"  — ignore the CLI default for this file
+          #   "mode":   "0644"       — ignore the owner-only default (0600)
+        }
+      },
       "users": {
         "<handle>": {
           "settings": { <deep-merged into settings.json> },
@@ -142,12 +149,16 @@ def deep_merge(base: dict, patch: dict) -> dict:
 # ── writing ──────────────────────────────────────────────────────────────────
 
 
-def write_atomic(path: str, payload: bytes, dry_run: bool) -> bool:
+def write_atomic(path: str, payload: bytes, dry_run: bool, mode: int = FILE_MODE) -> bool:
     """Write via a temp file in the same directory, then rename over.
 
     A crash midway must not leave a half-written `settings.json`; the rename is
     atomic within a filesystem, which the same-directory temp file guarantees.
-    Returns True if a write happened.
+
+    `mode` defaults to the owner-only `FILE_MODE` because almost everything here
+    may hold a key. A caller seeding something that is SERVED to browsers must
+    pass its own mode — `0644` for `_css/user.css`, which `userCssMiddleware`
+    hands to every visitor via `res.sendFile`.
     """
     if dry_run:
         return True
@@ -157,7 +168,7 @@ def write_atomic(path: str, payload: bytes, dry_run: bool) -> bool:
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(payload)
-        os.chmod(tmp, FILE_MODE)
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -166,6 +177,43 @@ def write_atomic(path: str, payload: bytes, dry_run: bool) -> bool:
             pass
         raise
     return True
+
+
+def mode_for(entry: dict, default: int = FILE_MODE) -> int:
+    """Resolve a per-entry `mode`, which is a 4-digit octal STRING like "0644".
+
+    A string rather than a number because that is what a Nix string literal
+    carries. Only strings are accepted: an int would silently bypass the
+    octal-string check, so `6440` would be taken as decimal rather than rejected,
+    and the resulting `os.chmod` argument would be nonsense. The error is worth
+    more than the convenience — the only caller is a rendered spec.
+    """
+    raw = entry.get("mode")
+    if raw is None:
+        return default
+    if not isinstance(raw, str) or len(raw) != 4 or any(c not in "01234567" for c in raw):
+        raise SeedError(
+            f"`mode` must be a 4-digit octal string such as \"0644\", got {raw!r}"
+        )
+    return int(raw, 8)
+
+
+def policy_for(entry: dict, default: str) -> str:
+    """Resolve a per-entry `policy`, overriding the CLI-wide default.
+
+    This exists for exactly one caller: `_css/user.css`, which must be
+    overwritten on every activation regardless of `seedPolicy` because nothing
+    in the server ever writes it, so create-only would mean the file is written
+    once and then never updated again.
+    """
+    raw = entry.get("policy")
+    if raw is None:
+        return default
+    if raw not in ("missing", "overwrite"):
+        raise SeedError(
+            f"`policy` must be \"missing\" or \"overwrite\", got {raw!r}"
+        )
+    return raw
 
 
 def payload_for(content: dict) -> bytes:
@@ -195,12 +243,15 @@ def payload_for(content: dict) -> bytes:
 def seed_file(
     root: str, rel: str, content: dict, policy: str, dry_run: bool, stats: dict
 ) -> None:
+    """Seed one file, honouring the entry's own `policy` and `mode` overrides."""
     target = safe_join(root, rel)
+    effective_policy = policy_for(content, policy)
+    effective_mode = mode_for(content)
     exists = os.path.exists(target)
-    if exists and policy == "missing":
+    if exists and effective_policy == "missing":
         stats["skipped"] += 1
         return
-    write_atomic(target, payload_for(content), dry_run)
+    write_atomic(target, payload_for(content), dry_run, effective_mode)
     stats["written"] += 1
     if not dry_run:
         _log(f"{'restored' if exists else 'created'} {rel}")

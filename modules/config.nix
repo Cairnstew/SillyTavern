@@ -440,20 +440,32 @@ let
   # `runCommand` that has to realise the file just to look at it, which makes the
   # regression test for the seedHandles bug slow and depends on the builder.
   seedSpecJson = {
-      # Deliberately empty.
+      # The ONLY data-root-level content this module ever writes, and it comes
+      # from exactly one option.
       #
-      # `files.common` is documented as relative to each ACCOUNT's directory, and
-      # every configurable file SillyTavern owns lives under one: presets,
-      # themes, world books, settings.json, and so on. The only data-root-level
-      # things are `config.yaml` (which this module renders separately),
-      # `stats.json`, `backups/`, and the `_`-prefixed runtime directories —
-      # none of which are user configuration, and all of which the seeder
-      # refuses to touch anyway.
+      # `dataRootFiles` was empty for a reason: listing `cfg.files.common` here as
+      # well was a real bug that seeded every file twice and created stray
+      # top-level directories SillyTavern never reads. The fix is NOT to
+      # repopulate this from `files.common` — it is to feed it from a single
+      # dedicated option with a LITERAL key, so the two maps are fed from
+      # disjoint sources and no user expression can put one path in both.
+      # assertions.nix re-checks that on every evaluation.
       #
-      # Listing `cfg.files.common` here as well was a real bug: it seeded every
-      # file twice and created stray top-level directories in the data root that
-      # SillyTavern never reads.
-      dataRootFiles = { };
+      # `_css` is not in the seeder's reserved set: unlike `_storage`, `_cache`
+      # and `_errors`, it is configuration, and this is the only supported way
+      # to write it.
+      dataRootFiles = lib.optionalAttrs (cfg.customCss != null) {
+        "_css/user.css" = {
+          path = toString cfg.customCss;
+          # Nix-authoritative, ignoring `seedPolicy`. Nothing in the server
+          # writes this file — `userCssMiddleware` only reads it — so
+          # create-only would freeze the first version in place forever.
+          policy = "overwrite";
+          # Read-only to the service account and served to every visitor by
+          # `res.sendFile`, so NOT the 0600 every other seeded file gets.
+          mode = "0644";
+        };
+      };
       users = lib.genAttrs seedHandles (
         handle: {
           # `//` so a per-account leaf overrides the shared one without the

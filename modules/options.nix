@@ -1932,6 +1932,60 @@ in
       '';
     };
 
+    # ── Instance-wide custom CSS ──────────────────────────────────────────────
+    #
+    # SillyTavern loads `css/user.css` on every page (`public/index.html:46`) and
+    # serves it from the DATA ROOT, not the package:
+    #
+    #   src/middleware/userCss.js:10
+    #     path.resolve(path.join(globalThis.DATA_ROOT, '_css', 'user.css'))
+    #
+    # It is the only stylesheet SillyTavern exposes to every visitor without a
+    # login, and there is no other way to get a file there from outside the app.
+    #
+    # It is NOT the same thing as `settings.common.power_user.custom_css`, which
+    # is the in-browser editor's textarea and is already seedable. Two
+    # mechanisms, two files; this one is instance-wide, theirs is per-account.
+
+    customCss = mkOption {
+      type = types.nullOr types.path;
+      default = null;
+      example = literalExpression "./ui-overrides.css";
+      description = ''
+        A stylesheet installed as `<dataRoot>/_css/user.css` on every activation.
+
+        Applies to the whole instance: every visitor of every account gets it,
+        and it is served without authentication.
+
+        ⚠ NIX-AUTHORITATIVE: while this option is set the file is
+        OVERWRITTEN on every activation, and `seedPolicy` does not apply to it.
+        That is deliberate and it is the opposite of how every other file in
+        this module behaves. The reasoning is that create-only semantics would
+        protect nothing here:
+
+          * Nothing in the server writes this file. `_css` is the global target
+            for `CONTENT_TYPES.STYLESHEET` (`src/endpoints/content-manager.js`),
+            but the only routes that write there are `importURL` and
+            `importUUID`, and there is no UI for either — `grep -rn
+            contentmanager public/` finds nothing.
+          * The in-browser editor people actually use is
+            `settings.common.power_user.custom_css`, which lands in
+            `settings.json` and is seeded create-only like everything else.
+
+        So under `"missing"` the file would simply be written once and never
+        updated again, and editing this option would silently do nothing — the
+        exact failure mode this option exists to fix.
+
+        Leaving this `null` means the module NEVER TOUCHES the file: an existing
+        `_css/user.css` is left completely alone, whether hand-written, imported
+        through the content manager, or migrated from an older install by
+        `src/users.js` (which moves a legacy `public/css/user.css` into the data
+        root when the target does not already exist). Removing this option from
+        your configuration does NOT delete a previously-seeded file — it stops
+        managing it and leaves it in place.
+      '';
+    };
+
     # ── Provider API keys ─────────────────────────────────────────────────────
     #
     # 1.19 moved every provider key OUT of `settings.json` and into a
