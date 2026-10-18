@@ -406,7 +406,7 @@ in
 
   # ── mkUserArg ───────────────────────────────────────────────────────────────
   #
-  # Resolves one `services.sillytavern.users.<handle>` spec into the flat shape
+  # Resolves one `services.sillytavern-nixos.users.<handle>` spec into the flat shape
   # scripts/st_seed_users.py consumes on its command line.
   #
   # `name` falls back to the handle, because that is what the server would have
@@ -433,19 +433,19 @@ in
   # shape is uniform with other services in a consumer's upstream list.
   #
   # `config` is the consumer's whole module config, so that one call reads the
-  # port out of `services.sillytavern.config.port` for every named instance
+  # port out of `services.sillytavern-nixos.config.port` for every named instance
   # without this function having to know the option path:
   #
   #   proxy.upstreams = lib.mkMerge (map mkUpstream
-  #     (config.services.sillytavern.proxyUpstreams));
+  #     (config.services.sillytavern-nixos.proxyUpstreams));
   #
   #   # …then, per instance:
-  #   nix eval --json '.#nixosConfigurations.host.config.services.sillytavern.proxyUpstreams'
+  #   nix eval --json '.#nixosConfigurations.host.config.services.sillytavern-nixos.proxyUpstreams'
   #
   # `openFirewall` is deliberately NOT handled here: a reverse proxy reaching
   # SillyTavern over loopback needs no firewall hole at all, and SillyTavern
   # does not speak TLS on its own port without extra certificates. Exposing it
-  # directly is the `services.sillytavern.openFirewall` option's job, and it
+  # directly is the `services.sillytavern-nixos.openFirewall` option's job, and it
   # defaults to false.
   mkProxyUpstream =
     {
@@ -457,7 +457,17 @@ in
     }:
     {
       name = configName;
-      port = config.services.sillytavern.config.port;
+      # `sillytavern-nixos`, NOT `sillytavern`. nixos-unstable ships its own
+      # `services.sillytavern`, so that attribute always exists — reading it
+      # resolved to the OTHER module, which has no `config` sub-option, and the
+      # documented example in `proxyUpstreams` failed to evaluate outright:
+      #
+      #   error: attribute 'config' missing
+      #
+      # This is the same defect modules/home.nix had, in an exported helper.
+      # `port` is also overridable so a consumer integrating several services
+      # does not have to use this at all.
+      port = config.services.sillytavern-nixos.config.port;
       inherit path stripPrefix displayName;
     };
 }
