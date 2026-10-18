@@ -53,7 +53,22 @@ let
   );
 in
 {
-  assertions = [
+  # Gated on `enable` as a whole, not assertion by assertion.
+  #
+  # `modules/sillytavern.nix` imports this file UNCONDITIONALLY (it is not
+  # inside `services.nix`'s `mkIf`), so without this every one of the 36
+  # assertions below is evaluated — and can FAIL — with the module switched
+  # off. That is not hypothetical: the nixpkgs-collision assertion was written
+  # without a guard and blocked a user running nixpkgs' own module who had never
+  # installed ours. Adding a 37th assertion in the same style would reproduce it.
+  #
+  # `mkIf` around the LIST, not around the import: gating `imports` on `config`
+  # is an infinite recursion, because `config` cannot be known until every
+  # imported module has been evaluated.
+  #
+  # `config.enableUserAccounts` and friends are not evaluated at all when the
+  # module is off, which is the point.
+  assertions = lib.mkIf cfg.enable [
     # ── JSON-driven state ─────────────────────────────────────────────────────
     {
       # A `byUser` handle that is not a declared account would be seeded into a

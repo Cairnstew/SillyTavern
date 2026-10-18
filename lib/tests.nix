@@ -585,14 +585,62 @@ rec {
     # ── 4. neither enabled → ours is never declared ───────────────────────────
     assert failingWithOurMarker neither == [ ];
 
-    # Deliberately NOT `allPass` on the whole list: this module has other
-    # assertions that legitimately fail on a minimal config (e.g. "no
-    # authentication is configured" when enableUserAccounts is false). What
-    # matters here is only that the COLLISION assertion misfires nowhere but the
-    # both-enabled case, which the three marker checks above establish.
-
     pkgs.runCommand "sillytavern-check-upstream-collision" { } ''
       echo "PASS upstream-collision-asserted (both -> ours fails; theirs-only / ours-only / neither -> clean)"
+      touch "$out"
+    '';
+
+  # `modules/sillytavern.nix` imports `assertions.nix` UNCONDITIONALLY — it is
+  # not inside services.nix's `mkIf`. The file therefore wraps its own list in
+  # `lib.mkIf cfg.enable`. Without that, importing this module while running
+  # nixpkgs' `services.sillytavern` would fail on assertions belonging to a
+  # module the user never enabled.
+  #
+  # It also means a disabled module must contribute NO assertions at all, which
+  # is stronger and easier to test than "none of ours happen to fail".
+  assertionsDisabledCleanly =
+    pkgs:
+    let
+      base = {
+        boot.loader.grub.enable = false;
+        fileSystems."/" = { device = "/dev/null"; fsType = "tmpfs"; };
+        system.stateVersion = "25.05";
+      };
+      cfgWith = modules: (nixpkgs.lib.nixosSystem {
+        system = pkgs.stdenv.hostPlatform.system;
+        modules = modules ++ [ base ];
+      }).config;
+
+      # The precise statement: a DISABLED module of ours contributes nothing at
+      # all. So importing it must be indistinguishable from not importing it.
+      #
+      # Compared against a system with no SillyTavern module of ours at all,
+      # NOT against "nothing enabled" — enabling nixpkgs' module legitimately
+      # adds assertions of its own (9 on this system), so the naive comparison
+      # looked like a failure when the behaviour was correct.
+      withOursDisabled = cfgWith [
+        modulePath
+        { services.sillytavern.enable = true; }   # nixpkgs' module, on
+      ];
+      withoutOurs = cfgWith [
+        { services.sillytavern.enable = true; }
+      ];
+      bothOff = cfgWith [ modulePath ];
+
+      # …and with ours enabled it DOES contribute, otherwise this check would
+      # pass trivially on a module that had been emptied out.
+      oursEnabled = cfgWith [ modulePath { services.sillytavern-nixos.enable = true; } ];
+    in
+    assert builtins.length withOursDisabled.assertions == builtins.length withoutOurs.assertions;
+    assert builtins.length bothOff.assertions == builtins.length (cfgWith [ ]).assertions;
+
+    assert builtins.all (a: a.assertion) withOursDisabled.assertions;
+
+    # Sanity: enabled, we do contribute.
+    assert builtins.length oursEnabled.assertions > builtins.length bothOff.assertions;
+
+    pkgs.runCommand "sillytavern-check-assertions-disabled-cleanly" { } ''
+      echo "PASS assertions-disabled-cleanly (disabled -> contributes nothing; enabled -> contributes)"
       touch "$out"
     '';
 
@@ -669,6 +717,7 @@ rec {
       seedSpecCoversCommon = seedSpecCoversCommon pkgs;
       customCssIsolated = customCssIsolated pkgs;
       upstreamCollisionAsserted = upstreamCollisionAsserted pkgs;
+      assertionsDisabledCleanly = assertionsDisabledCleanly pkgs;
       noCrossModuleReads = noCrossModuleReads pkgs;
       seeder = seeder pkgs;
     };

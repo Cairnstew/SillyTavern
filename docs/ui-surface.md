@@ -319,7 +319,44 @@ they never enabled.
 Backed by `upstreamCollisionAsserted` (four cases against the real nixpkgs
 module) and `noCrossModuleReads` (grep for the cross-namespace read).
 
-### 4.1.4 Planned breaking change — renaming to `-nixos`, NOT implemented
+**`noCrossModuleReads` is a grep, and a grep has limits.** It sees literal
+`(config|osConfig).services.sillytavern` text in `modules/` and `lib/`. It
+cannot see:
+
+* dynamic access through a variable — `let p = "services.sillytavern"; in config.${p}`,
+* a path assembled by string concatenation or an attribute built at runtime,
+* anything outside `modules/` and `lib/` (the flake's own files, or a consumer's).
+
+It is a cheap regression net, not a type check. Treat a passing run as "no one
+wrote that expression", not "no wrong reads exist".
+
+### 4.1.4 The assertion gate, and why it is there
+
+`modules/sillytavern.nix` imports `assertions.nix` **unconditionally** — it is
+not inside `services.nix`'s `mkIf`. Gating `imports` on `config` is an
+infinite recursion (config cannot be known until every import is evaluated), so
+the gate lives in the file instead:
+
+```nix
+assertions = lib.mkIf cfg.enable [
+  # 36 assertions
+];
+```
+
+Before this, all 36 were evaluated with the module switched off, and the
+collision assertion — written without a `cfg.enable` arm — blocked a user
+running nixpkgs' module who had never installed ours.
+
+`assertionsDisabledCleanly` pins the invariant: a disabled module must
+contribute **nothing**, so importing it is indistinguishable from not importing
+it. Verified by removing the `mkIf`, which fails the check.
+
+⚠ The comparison is against a system with no SillyTavern module at all, NOT
+against "nothing enabled". Enabling nixpkgs' module adds 9 assertions of its own,
+so the naive comparison reports a failure when the behaviour is correct — it did,
+and was wrong.
+
+### 4.1.5 Planned breaking change — renaming to `-nixos`, NOT implemented
 
 Agreed direction, deliberately **not** done here because it is breaking.
 
