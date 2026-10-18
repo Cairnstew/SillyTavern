@@ -140,7 +140,9 @@
               # The app's own toolchain. `npm` comes bundled with nodejs, and
               # there is no top-level `npm` attribute in nixpkgs to add.
               nodejs
-              nodePackages.eslint
+              # `pkgs.eslint`, not `pkgs.nodePackages.eslint`: nodePackages was
+              # removed from nixpkgs; the packages moved to the top level.
+              eslint
 
               # The activation-time helpers. scripts/st_seed_users.py uses only
               # the standard library, so this is for running the tests and for

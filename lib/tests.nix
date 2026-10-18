@@ -48,7 +48,7 @@ let
   # `npm ci`. Pinned to the version SillyTavern's own lockfile resolves, so the
   # check parses with exactly the parser the server will.
   yamlPackage =
-    { lib, stdenvNoCC, nodejs }:
+    { lib, stdenvNoCC, nodejs, caCertFile ? null }:
     stdenvNoCC.mkDerivation {
       pname = "yaml-npm";
       version = "2.8.3";
@@ -56,6 +56,10 @@ let
       nativeBuildInputs = [ nodejs ];
       dontConfigure = true;
       dontBuild = true;
+      # There is no `src`: this derivation installs straight from the npm
+      # registry. Without this, the unpack phase runs and fails with
+      # "variable $src or $srcs should point to the source".
+      dontUnpack = true;
       # The YAML parser must not be shebang-patched or its hash would depend on
       # this nixpkgs' bash. See the identical note in pkgs/sillytavern/default.nix.
       dontFixup = true;
@@ -63,6 +67,12 @@ let
       installPhase = ''
         runHook preInstall
         export HOME="$TMPDIR"
+        ${lib.optionalString (caCertFile != null) ''
+          # On a host whose TLS is intercepted by a corporate proxy, npm needs
+          # the system CA bundle; Node does not read it automatically.
+          # Mirrors the argument on pkgs/sillytavern/default.nix.
+          export NODE_EXTRA_CA_CERTS="${caCertFile}"
+        ''}
         mkdir -p package && cd package
         npm install --no-audit --no-fund --no-progress --loglevel=error 'yaml@2.8.3'
         mv node_modules "$out"
@@ -122,11 +132,19 @@ rec {
       system = evalSystem pkgs { services.sillytavern-nixos.enable = true; };
       sc = system.config.systemd.services.sillytavern.serviceConfig;
       renderedConfig = system.config.services.sillytavern-nixos.internal.renderedConfig;
+      startupTimeout = system.config.services.sillytavern-nixos.startupTimeout;
+      # Precomputed here: a `runCommand` script is SHELL, so a Nix expression
+      # such as `lib.concatStringsSep` cannot appear inside it.
+      execStartJoined = lib.concatStringsSep " " sc.ExecStart;
+      # Elements containing whitespace are the failure mode being guarded
+      # against; surfaced as an eval error rather than a shell assertion.
+      execStartElementsWithSpaces = builtins.filter (e: builtins.match ".* .*" e != null) sc.ExecStart;
     in
+    # Fails at eval time with the offending elements named.
+    assert execStartElementsWithSpaces == [ ];
     pkgs.runCommand "sillytavern-check-module-evaluates"
       {
         nativeBuildInputs = [ pkgs.coreutils ];
-        passAsFile = [ "startupTimeoutText" ];
       }
       ''
         fail() {
@@ -144,18 +162,35 @@ rec {
         [ "${sc.ProtectSystem}" = "strict" ] || fail "ProtectSystem is ${sc.ProtectSystem}"
         [ "${sc.Restart}" = "on-failure" ] || fail "Restart is ${sc.Restart}"
         [ "${sc.KillSignal}" = "SIGTERM" ] || fail "KillSignal is ${sc.KillSignal}"
-        [ "${sc.TimeoutStartSec}" = "$(cat "$startupTimeoutPath")" ] \
-          || fail "TimeoutStartSec is ${sc.TimeoutStartSec}"
+        [ "${sc.TimeoutStartSec}" = "${toString startupTimeout}" ] \
+          || fail "TimeoutStartSec is ${sc.TimeoutStartSec}, expected ${toString startupTimeout}"
 
         # --configPath must point at the rendered store file and --dataRoot at the
         # state directory: together they are the reason the unit is reproducible.
-        case "${sc.ExecStart}" in
+        #
+        # ExecStart is an argv LIST — one element per argument — because systemd
+        # passes each element to the process verbatim, with no word splitting and
+        # no quote removal. Joining it with spaces here is only for matching.
+        # (Interpolating a list into a Nix string is a type error, hence the
+        # explicit concatStringsSep.)
+        case "${execStartJoined}" in
           *--configPath=*) ;;
-          *) fail "ExecStart has no --configPath: ${sc.ExecStart}" ;;
+          *) fail "ExecStart has no --configPath" ;;
         esac
-        case "${sc.ExecStart}" in
+        case "${execStartJoined}" in
           *--dataRoot=/var/lib/sillytavern*) ;;
           *) fail "ExecStart has no --dataRoot=/var/lib/sillytavern" ;;
+        esac
+
+        # argv[0] is the launcher and every later element is a single flag: no
+        # element may contain a space-joined command line, which is the bug that
+        # made yargs drop every option. Asserted in Nix, not in shell — a Nix
+        # error names the offending element, a shell one does not.
+        # `--global` must never be emitted. The launcher refuses it, and in that
+        # mode SillyTavern ignores --configPath and --dataRoot.
+        case "${execStartJoined}" in
+          *--global*)
+            fail "ExecStart emits --global, which the launcher refuses" ;;
         esac
 
         # The rendered config must be mode 444. The server tries to rewrite
@@ -189,7 +224,14 @@ rec {
           cp ${../default/config.yaml} $out
         '';
 
-      yamlPackage = pkgs.callPackage yamlPackage { };
+      # NOT named `yamlPackage`: that would shadow the top-level binding of
+      # the same name and make this `pkgs.callPackage <itself>`, which is an
+      # infinite recursion rather than an error you can read.
+      yamlPkg = pkgs.callPackage yamlPackage {
+        # `/etc/ssl` is the NixOS convention; absent on non-NixOS hosts,
+        # where the plain derivation still works against a clean network.
+        caCertFile = if builtins.pathExists /etc/ssl/certs then "/etc/ssl/certs/ca-bundle.crt" else null;
+      };
 
       # The three credentials the module strips from the render. Values are
       # never compared — a check's output must not be able to leak one — and
@@ -215,7 +257,7 @@ rec {
 
         # `yaml` is resolved from the package's node_modules by NODE_PATH, so the
         # two documents are parsed by exactly the parser SillyTavern uses.
-        export NODE_PATH=${yamlPackage}/node_modules
+        export NODE_PATH=${yamlPkg}
 
         cat > overrides.json <<JSON
         ${builtins.toJSON {
@@ -277,14 +319,13 @@ rec {
     let
       cfg = (evalSystem pkgs { services.sillytavern-nixos.enable = true; }).config;
     in
+    # Asserted at EVAL time rather than by string-building into shell. The
+    # previous version interpolated the value into a shell assignment and
+    # compared it there, which reported an empty value and a misleading message
+    # when it failed. `assert` fails at evaluation with the real value.
+    assert cfg.services.sillytavern-nixos.internal.effectiveConfig.browserLaunch.enabled == false;
     pkgs.runCommand "sillytavern-check-browser-launch" { } ''
-      enabled="${toString (builtins.getAttr "enabled" cfg.services.sillytavern-nixos.internal.effectiveConfig.browserLaunch)}"
-      if [ "$enabled" = "false" ]; then
-        echo "PASS browser-launch-disabled"
-      else
-        echo "FAIL browser-launch: browserLaunch.enabled is $enabled, expected false" >&2
-        exit 1
-      fi
+      echo "PASS browser-launch-disabled"
       touch "$out"
     '';
 
