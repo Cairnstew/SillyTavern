@@ -537,6 +537,127 @@ rec {
       touch "$out"
     '';
 
+  # nixpkgs ships its own `services.sillytavern`, and both modules own
+  # `systemd.services.sillytavern`, `users.users.sillytavern` and
+  # `serviceConfig.StateDirectory`. These cases pin the behaviour of the
+  # assertion that rejects that combination.
+  upstreamCollisionAsserted =
+    pkgs:
+    let
+      # `services.sillytavern` is ALREADY in scope: `nixosSystem` loads nixpkgs'
+      # whole module-list.nix, which registers services/web-apps/sillytavern.nix.
+      # These cases therefore exercise the REAL upstream module, not a stand-in.
+      mk = extra: (evalSystem pkgs extra).config;
+
+      # Only FAILING assertions are inspected, and each `.message` read is
+      # wrapped in tryEval. Forcing every message walks NixOS' own assertions,
+      # one of which (`tasks/filesystems.nix`) has a message that reads
+      # `fileSystems`, and forcing it inside this evaluation is an attribute
+      # cycle — unrelated to SillyTavern and not worth the fragility.
+      failingWithOurMarker =
+        cfg:
+        let failing = builtins.filter (a: !a.assertion) cfg.assertions;
+        in
+          builtins.filter
+            (a: (builtins.tryEval (builtins.match ".*ALSO defines.*" a.message)).success
+                 && (builtins.tryEval (builtins.match ".*ALSO defines.*" a.message)).value != null)
+            failing;
+
+      oursOnly     = mk { services.sillytavern-nixos.enable = true; };
+      theirsOnOnly = mk { services.sillytavern.enable = true; };
+      bothOn       = mk {
+        services.sillytavern-nixos.enable = true;
+        services.sillytavern.enable = true;
+      };
+      neither      = mk { };
+    in
+    # ── 1. both enabled → ours is declared and FAILS ──────────────────────────
+    assert builtins.length (failingWithOurMarker bothOn) == 1;
+
+    # ── 2. nixpkgs' enabled, ours disabled → ours does not block the user ─────
+    # The important negative: running nixpkgs' module must not be stopped by one
+    # that was never enabled.
+    assert failingWithOurMarker theirsOnOnly == [ ];
+
+    # ── 3. ours only → ours does not fail ─────────────────────────────────────
+    assert failingWithOurMarker oursOnly == [ ];
+
+    # ── 4. neither enabled → ours is never declared ───────────────────────────
+    assert failingWithOurMarker neither == [ ];
+
+    # Deliberately NOT `allPass` on the whole list: this module has other
+    # assertions that legitimately fail on a minimal config (e.g. "no
+    # authentication is configured" when enableUserAccounts is false). What
+    # matters here is only that the COLLISION assertion misfires nowhere but the
+    # both-enabled case, which the three marker checks above establish.
+
+    pkgs.runCommand "sillytavern-check-upstream-collision" { } ''
+      echo "PASS upstream-collision-asserted (both -> ours fails; theirs-only / ours-only / neither -> clean)"
+      touch "$out"
+    '';
+
+  # Nothing in the module may READ another module's namespace. Two defects
+  # shipped from exactly this mistake — `modules/home.nix` and
+  # `lib/default.nix` both read `services.sillytavern` and both broke, one of
+  # them in an exported flake lib function. A grep is the cheapest thing that
+  # catches a third.
+  #
+  # The ONE exception is `modules/assertions.nix`, whose whole job is to detect
+  # nixpkgs' module. That line is matched by a literal, not waved through.
+  noCrossModuleReads =
+    pkgs:
+    let
+      offenders = pkgs.runCommand "sillytavern-check-no-cross-module-reads"
+        {
+          nativeBuildInputs = [ pkgs.gnugrep pkgs.coreutils ];
+        }
+        ''
+          # The sources have to be COPIED in: a runCommand's build directory
+          # starts empty, so `../modules` would silently scan nothing and this
+          # check would pass unconditionally. That was the first version.
+          cp -r ${../modules} ./modules
+          cp -r ${../lib} ./lib
+
+          # Anchored on `config.` / `osConfig.` immediately followed by
+          # `services.sillytavern`, and NOT followed by `-` or an alphanumeric.
+          #
+          # Both halves matter, and the first version of this check got both
+          # wrong:
+          #
+          #  * With a trailing `.` required, an attrset-level read — which is
+          #    exactly the shape of both real bugs, `...sillytavern or null` —
+          #    was missed entirely.
+          #  * Without the `config.` anchor, three legitimate references were
+          #    caught: this module's own `systemd.services.sillytavern-healthcheck`
+          #    unit, and two lines in this test harness that deliberately set
+          #    nixpkgs' option. Neither is an options-namespace read.
+          #
+          # The trailing `-` exclusion drops `sillytavern-nixos` (and
+          # `-healthcheck`, `-package`) without a second filter pass.
+          #
+          # Comments are excluded: options.nix documents this very collision in
+          # prose, and assertions.nix detects nixpkgs' module on purpose.
+          grep -rInE '(config|osConfig)\.services\.sillytavern([^0-9A-Za-z_-]|$)' \
+            ./modules ./lib \
+            | sed 's|^\./||' \
+            | grep -vE '^[a-z/._-]+\.nix:[0-9]+:[[:space:]]*#' \
+            | grep -v '^modules/assertions.nix:' \
+            > hits.txt || true
+          hits=$(cat hits.txt)
+
+          if [ -n "$hits" ]; then
+            echo "FAIL no-cross-module-reads: reading another module's namespace:" >&2
+            echo "$hits" >&2
+            echo >&2
+            echo "nixpkgs owns services.sillytavern. OURS is services.sillytavern-nixos." >&2
+            exit 1
+          fi
+          echo "PASS no-cross-module-reads"
+          touch "$out"
+        '';
+    in
+    offenders;
+
   checks =
     pkgs:
     {
@@ -547,6 +668,8 @@ rec {
       assertionsAreWired = assertionsAreWired pkgs;
       seedSpecCoversCommon = seedSpecCoversCommon pkgs;
       customCssIsolated = customCssIsolated pkgs;
+      upstreamCollisionAsserted = upstreamCollisionAsserted pkgs;
+      noCrossModuleReads = noCrossModuleReads pkgs;
       seeder = seeder pkgs;
     };
 

@@ -22,6 +22,19 @@ let
   cfg = config.services.sillytavern-nixos;
   inherit (cfg.internal) effectiveConfig secretEnvFiles secretEnvValues seedSpecJson;
 
+  # Whether NIXPKGS' `services.sillytavern` is enabled.
+  #
+  # `or false` here is a DELIBERATE detection of the nixpkgs namespace, and the
+  # only sanctioned exception to the rule in docs §4.1 ("any option path read
+  # from another module's namespace is `services.sillytavern-nixos`"). The point
+  # of the lookup is to notice nixpkgs' module, so reading it is the whole job.
+  #
+  # `or false` rather than a bare read because this module is also evaluated in
+  # the flake's minimal test systems, where a slimmed module list may not carry
+  # it at all. Absent and `enable = false` mean the same thing here, and both
+  # mean "not a conflict".
+  upstreamEnabled = config.services.sillytavern.enable or false;
+
   # `default-user` is created by the server itself on first start, so it is a
   # legitimate seed target without being a declared account.
   declaredHandles = builtins.attrNames cfg.users ++ [ "default-user" ];
@@ -167,6 +180,71 @@ in
         `st_seed_files.py` defaults every seeded file to 0600 because most of
         them may hold a key. `_css/user.css` is served unauthenticated to every
         visitor, so it has to be world-readable.
+      '';
+    }
+
+    # ── nixpkgs' own services.sillytavern ─────────────────────────────────────
+    #
+    # nixos-unstable ships a `services.sillytavern` module of its own
+    # (nixos/modules/services/web-apps/sillytavern.nix, registered in
+    # module-list.nix), and it is ALWAYS in scope — every NixOS system imports
+    # the whole module list, so the option exists whether or not anyone wants it.
+    # Ours is `services.sillytavern-nixos`.
+    #
+    # The two collide on three surfaces that are NOT option namespaced:
+    #
+    #   systemd.services.sillytavern      (the unit)
+    #   users.users.sillytavern           (the account)
+    #   systemd.services.sillytavern.serviceConfig.StateDirectory
+    #
+    # Verified against nixpkgs fe132422: that module's entire `config` block is a
+    # single `lib.mkIf cfg.enable` — `systemd.services.sillytavern`,
+    # `users.users`, `users.groups` and `systemd.tmpfiles.settings.sillytavern`
+    # are all inside it, with nothing unconditional. So checking `enable` alone
+    # is sufficient, and `enable = false` really does contribute nothing.
+    #
+    # Without this assertion the failure is a misleading conflict on
+    # `serviceConfig.Restart` ("always" vs "on-failure"), and a user who forces
+    # past it gets a merged unit whose ExecStart is nixpkgs' binary invoked WITH
+    # our wrapper and flags as arguments.
+    {
+      # Guarded on OUR `enable` as well as theirs. `sillytavern.nix` imports
+      # this file UNCONDITIONALLY (it is not inside services.nix's `mkIf`), so
+      # every assertion here is evaluated even when the module is switched off.
+      # Without the `!cfg.enable` arm, a user running nixpkgs' module and
+      # deliberately not installing ours would be blocked by a module they never
+      # enabled — which is the opposite of what this is for.
+      assertion = !cfg.enable || !upstreamEnabled;
+      message = ''
+        services.sillytavern-nixos: nixos-unstable ALSO defines
+        `services.sillytavern`, and both are enabled.
+
+        This module is `services.sillytavern-nixos`. The namespace `services.sillytavern`
+        belongs to a different, unrelated module that ships with nixpkgs.
+
+        Enabling both makes them fight over three things that are NOT namespaced
+        by option path, so they cannot coexist:
+
+          * the systemd unit        `systemd.services.sillytavern`
+          * the system account      `users.users.sillytavern`
+          * `serviceConfig.StateDirectory`
+
+        What you would see otherwise is a confusing conflict on
+        `serviceConfig.Restart` ("always" vs "on-failure"), and forcing past it
+        yields a merged unit that runs nixpkgs' binary with this module's wrapper
+        as arguments.
+
+        Fix: keep this one and disable the other —
+
+            services.sillytavern-nixos = { enable = true; ... };
+            services.sillytavern.enable = false;   # nixpkgs'
+
+        or drop this module and use nixpkgs' (which has no account seeding, no
+        JSON state, no secrets, and passes its flags as one quoted string).
+
+        Do NOT rename around it. The unit name and the state directory are
+        shared on purpose for now; a rename to `sillytavern-nixos` is planned
+        as a breaking change, not something to bolt on here.
       '';
     }
 
