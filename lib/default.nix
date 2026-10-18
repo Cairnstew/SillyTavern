@@ -296,6 +296,45 @@ let
     in
     concatStringsSep " " (filter (x: x != null) (map (name: render name flags.${name}) ordered));
 
+  # ── renderCliArgvList ───────────────────────────────────────────────────────
+  #
+  # The SAME flags as `renderCliArgv`, but as a LIST of argv elements — one
+  # element per argument, never a single joined string.
+  #
+  # This is what the systemd unit must use. `ExecStart` is `listOf str`, and
+  # systemd passes each list element to the process as ONE argv entry, with no
+  # word splitting and no quote removal. So the string form is actively harmful:
+  # `lib.escapeShellArg` wraps the whole command line in single quotes, systemd
+  # strips them and hands the process a single argument containing spaces, yargs
+  # sees one malformed flag, and `--configPath`, `--dataRoot` and `--global` are
+  # ALL silently ignored. Observed live: the server started, ignored the
+  # StateDirectory entirely, and created ~/.local/share/SillyTavern.
+  #
+  # Empty list values are still omitted for the reason given on `renderCliArgv`.
+  renderCliArgvList =
+    flags:
+    let
+      ordered = lib.sort (a: b: a < b) (lib.attrNames flags);
+      render =
+        name: value:
+        let
+          flag = "--${name}";
+        in
+        if value == true then
+          [ "${flag}=true" ]
+        else if value == false then
+          [ "${flag}=false" ]
+        else if builtins.isList value then
+          if value == [ ] then [ ] else lib.concatMap (e: [ flag (toString e) ]) value
+        else if value == null then
+          [ ]
+        else
+          # `--flag=value` as ONE element. A value containing spaces is safe
+          # here precisely because systemd does not split list elements.
+          [ "${flag}=${toString value}" ];
+    in
+    lib.concatMap (name: render name flags.${name}) ordered;
+
   # A single CLI scalar. Only a space or an empty string needs quoting; yargs
   # does not otherwise interpret shell metacharacters, but the unit's argv is
   # assembled through a shell (`ExecStart`), so a value with a space must be
@@ -358,6 +397,7 @@ in
     renderEnvLine
     renderEnvFile
     renderCliArgv
+    renderCliArgvList
     renderCliArgvScalar
     stripSecretPaths
     getPath

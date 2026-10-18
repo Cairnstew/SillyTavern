@@ -290,18 +290,24 @@ in
 
     package = mkOption {
       type = types.package;
-      default = pkgs.sillytavern or (throw ''
-        services.sillytavern-nixos.package: `pkgs.sillytavern` is not in your pkgs.
+      default = throw ''
+        services.sillytavern-nixos.package: no package was supplied.
 
-        This module expects the package from this flake. Import it as a flake
-        input and pass it through, or add the flake's `overlay`:
+        The module normally sets this itself (see modules/sillytavern.nix),
+        so reaching this message means you imported the option and config files
+        directly rather than through the flake's `nixosModules`.
 
-          inputs.sillytavern.url = "github:Cairnstew/nixos-sillytavern";
-          # …then either
-          nixpkgs.overlays = [ inputs.sillytavern.overlays.default ];
-          # or
-          services.sillytavern-nixos.package = inputs.sillytavern.packages.''${system}.sillytavern;
-      '');
+        Set it explicitly:
+
+          services.sillytavern-nixos.package =
+            inputs.sillytavern.packages.''${system}.sillytavern;
+
+        Do NOT fall back to a bare `pkgs.sillytavern`. nixos-unstable ships a
+        package of the same name and the same version whose entry point is
+        `src/server-global.js`; that forces global mode, in which SillyTavern
+        ignores --configPath and --dataRoot and stores its data under the
+        service account's ~/.local/share instead of the systemd StateDirectory.
+      '';
       defaultText = literalExpression "pkgs.sillytavern";
       description = "The SillyTavern package to run.";
     };

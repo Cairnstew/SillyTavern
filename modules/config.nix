@@ -62,7 +62,6 @@ let
     concatStringsSep
     last
     mapAttrsToList
-    mapAttrs'
     optionalAttrs
     removeAttrs
     removeSuffix
@@ -324,12 +323,21 @@ let
   # keeps the argv short and — more importantly — keeps the rendered config.yaml
   # authoritative. See the note on `renderCliArgv` in ../lib for why flags use
   # the explicit `--flag=value` form.
+  # `global` is emitted only when TRUE, never as `--global=false`.
+  #
+  # The packaged launcher refuses `--global` outright, because in that mode
+  # SillyTavern ignores --configPath and --dataRoot and resolves both through XDG
+  # directories. Always emitting `--global=false` therefore made the launcher
+  # reject the module's OWN argv and exit 2, so the unit never started.
+  #
+  # `false` is already the upstream default, so omitting it changes nothing
+  # except the noise; `true` is still emitted, and still refused.
   cliFlags =
     {
-      global = cfg.cli.global;
       configPath = if cfg.cli.configPath != "" then cfg.cli.configPath else renderedConfig;
       dataRoot = if cfg.cli.dataRoot != "" then cfg.cli.dataRoot else cfg.dataRoot;
     }
+    // optionalAttrs cfg.cli.global { global = true; }
     // optionalAttrs (cfg.cli.listen != null) { listen = cfg.cli.listen; }
     // optionalAttrs (cfg.cli.port != null) { port = cfg.cli.port; }
     // optionalAttrs (cfg.cli.listenAddressIPv4 != null) { listenAddressIPv4 = cfg.cli.listenAddressIPv4; }
@@ -344,29 +352,28 @@ let
     // optionalAttrs (cfg.cli.corsProxy != null) { corsProxy = cfg.cli.corsProxy; }
     // optionalAttrs (cfg.cli.disableCsrf != null) { disableCsrf = cfg.cli.disableCsrf; }
     // optionalAttrs (cfg.cli.ssl != null) { ssl = cfg.cli.ssl; }
-    // optionalAttrs (cfg.cli.certPath != null) { certPath = cfg.cli.certPath; }
-    // optionalAttrs (cfg.cli.keyPath != null) { keyPath = cfg.cli.keyPath; }
-    // optionalAttrs (cfg.cli.keyPassphrase != null) { keyPassphrase = cfg.cli.keyPassphrase; }
+    // optionalAttrs (cfg.cli.certPath != "" && cfg.cli.certPath != null) { certPath = cfg.cli.certPath; }
+    // optionalAttrs (cfg.cli.keyPath != "" && cfg.cli.keyPath != null) { keyPath = cfg.cli.keyPath; }
+    // optionalAttrs (cfg.cli.keyPassphrase != "") { keyPassphrase = cfg.cli.keyPassphrase; }
     // optionalAttrs (cfg.cli.whitelist != null) { whitelist = cfg.cli.whitelist; }
     // optionalAttrs (cfg.cli.basicAuthMode != null) { basicAuthMode = cfg.cli.basicAuthMode; }
     // optionalAttrs (cfg.cli.enableKeepAlive != null) { enableKeepAlive = cfg.cli.enableKeepAlive; }
     // optionalAttrs (cfg.cli.requestProxyEnabled != null) { requestProxyEnabled = cfg.cli.requestProxyEnabled; }
     // optionalAttrs (cfg.cli.requestProxyUrl != null) { requestProxyUrl = cfg.cli.requestProxyUrl; }
-    # `requestProxyBypass` cannot be expressed as an EMPTY list on the command
-    # line: yargs has no way to take a zero-length array, and emitting the flag
-    # with no value would make it swallow the next flag. So an empty list here
-    # means "do not pass the flag" and `requestProxy.bypass` stays in charge.
-    # Use `extraConfig` if you genuinely need an empty bypass list.
     // optionalAttrs (cfg.cli.requestProxyBypass != null) { requestProxyBypass = cfg.cli.requestProxyBypass; }
     // optionalAttrs (cfg.cli.heartbeatInterval != null) { heartbeatInterval = cfg.cli.heartbeatInterval; }
-    # Deprecated flags, emitted only when explicitly set. Passing one alongside
-    # its replacement is silently ignored in favour of the replacement.
     // optionalAttrs (cfg.cli.autorun != null) { autorun = cfg.cli.autorun; }
     // optionalAttrs (cfg.cli.autorunHostname != null) { autorunHostname = cfg.cli.autorunHostname; }
     // optionalAttrs (cfg.cli.autorunPortOverride != null) { autorunPortOverride = cfg.cli.autorunPortOverride; }
     // optionalAttrs (cfg.cli.avoidLocalhost != null) { avoidLocalhost = cfg.cli.avoidLocalhost; };
 
   renderedArgv = st.renderCliArgv cliFlags;
+
+  # The argv the unit actually runs. A LIST, because systemd hands each
+  # `ExecStart` element to the process as a single argv entry: joining the
+  # flags into one escaped word (as `renderedArgv` does, for humans reading the
+  # unit) makes yargs ignore every flag in it.
+  cliArgvList = st.renderCliArgvList cliFlags;
 
   # ── healthcheck.js ──────────────────────────────────────────────────────────
   #
@@ -383,7 +390,13 @@ let
   # ── Resolved users ──────────────────────────────────────────────────────────
   #
   # The attribute name is the handle; `mkUserArg` fills in `name` from it.
-  resolvedUsers = mapAttrs' st.mkUserArg cfg.users;
+  #
+  # `lib.mapAttrs`, NOT `lib.mapAttrs'`. The primed variant hands your function's
+  # result straight to `listToAttrs`, which requires each element to be a
+  # `{ name, value; }` pair — `mkUserArg` returns a plain record, so it fails
+  # with "in a {name=...; value=...;} pair / attribute 'value' missing".
+  # `lib.mapAttrs` wraps the result for you.
+  resolvedUsers = lib.mapAttrs st.mkUserArg cfg.users;
 
   # ── The JSON-state seed spec ──────────────────────────────────────────────
   #
@@ -401,7 +414,20 @@ let
 
   seedSpec = pkgs.writeText "sillytavern-seed-spec.json" (
     builtins.toJSON {
-      dataRootFiles = cfg.files.common;
+      # Deliberately empty.
+      #
+      # `files.common` is documented as relative to each ACCOUNT's directory, and
+      # every configurable file SillyTavern owns lives under one: presets,
+      # themes, world books, settings.json, and so on. The only data-root-level
+      # things are `config.yaml` (which this module renders separately),
+      # `stats.json`, `backups/`, and the `_`-prefixed runtime directories —
+      # none of which are user configuration, and all of which the seeder
+      # refuses to touch anyway.
+      #
+      # Listing `cfg.files.common` here as well was a real bug: it seeded every
+      # file twice and created stray top-level directories in the data root that
+      # SillyTavern never reads.
+      dataRootFiles = { };
       users = lib.genAttrs seedHandles (
         handle: {
           # `//` so a per-account leaf overrides the shared one without the
@@ -465,6 +491,7 @@ in
 services.sillytavern-nixos.internal = {
   renderedConfig = renderedConfig;
   renderedArgv = renderedArgv;
+      cliArgvList = cliArgvList;
   effectiveConfig = effectiveConfig;
   secretEnvFiles = secretEnvFiles;
   secretEnvValues = secretEnvEntries;

@@ -567,7 +567,11 @@ in
     # diagnose. Rejected here rather than escaped, because there is no correct
     # answer available to us.
     {
-      assertion = lib.all (name: value: !(lib.hasInfix "\n" value)) secretEnvValues;
+      # Over `attrNames`, not the attrset: `lib.all` takes a LIST. Passing the
+      # attrset fails with "expected a list but found a set" — and fails
+      # SILENTLY-safely only because it is empty when no secrets are declared.
+      assertion = lib.all (name: !(lib.hasInfix "\n" secretEnvValues.${name}))
+        (builtins.attrNames secretEnvValues);
       message = ''
         services.sillytavern-nixos: a secret file's contents contain a newline.
 
@@ -582,7 +586,9 @@ in
     }
 
     {
-      assertion = lib.all (name: value: !(lib.hasInfix "\n" value)) (lib.mapAttrsToList (_: v: v) cfg.environment);
+      # A ONE-argument predicate: `lib.all` calls `pred elem`, so a curried
+      # `name: value: …` would return a function where a boolean is expected.
+      assertion = lib.all (value: !(lib.hasInfix "\n" value)) (lib.attrValues cfg.environment);
       message = ''
         services.sillytavern-nixos: a value in services.sillytavern-nixos.environment
         contains a newline.

@@ -56,7 +56,7 @@
 let
   cfg = config.services.sillytavern-nixos;
   internal = cfg.internal;
-  inherit (internal) hasSecrets secretEnvFiles resolvedUsers packaged renderedArgv healthcheckEnv seedSpec;
+  inherit (internal) hasSecrets secretEnvFiles resolvedUsers packaged renderedArgv cliArgvList healthcheckEnv seedSpec;
 
   seeder = ../scripts/st_seed_users.py;
   jsonSeeder = ../scripts/st_seed_files.py;
@@ -78,12 +78,21 @@ let
   #
   # RuntimeDirectory=sillytavern is 0700 and owned by the service account, so
   # only this user can read the file.
-  serviceLauncher = pkgs.writeShellScript "sillytavern-service" ''
-    set -a
-    ${lib.optionalString hasSecrets "  . /run/sillytavern/secrets.env"}
-    set +a
-    exec ${lib.getExe' packaged "sillytavern"} "$@"
-  '';
+  #
+  # `writeShellApplication`, not `writeShellScript`: the latter writes the
+  # script to $out/<name> while everything else in NixOS — including
+  # `lib.getExe` — assumes $out/bin/<name>. Hard-coding either path is a trap;
+  # `writeShellApplication` gives the conventional layout and a proper `meta`.
+  serviceLauncher = pkgs.writeShellApplication {
+    name = "sillytavern-service";
+    runtimeInputs = [ pkgs.coreutils ];
+    text = ''
+      set -a
+      ${lib.optionalString hasSecrets "  . /run/sillytavern/secrets.env"}
+      set +a
+      exec ${lib.getExe' packaged "sillytavern"} "$@"
+    '';
+  };
   python = pkgs.python3;
 
 
@@ -133,6 +142,13 @@ let
 
   userArgs = lib.concatStringsSep " " (lib.mapAttrsToList mkUserArg resolvedUsers);
 
+  # Fully-formed `--user SPEC` arguments, one per declared account.
+  #
+  # `mkUserArg` ALREADY shell-escapes its result, so these must not be escaped a
+  # second time: doing so hands the script a literal `'handle` and it rejects the
+  # key with "unknown --user key".
+  userSpecs = lib.attrValues (lib.mapAttrs mkUserArg resolvedUsers);
+
   # The preStart script: assemble secrets, then seed accounts. Both run before
   # the server, and both are idempotent, so a `nixos-rebuild` that changes
   # nothing is a no-op.
@@ -160,11 +176,20 @@ let
     # Compare the declared option, not the derived `resolvedUsers`: the
     # derived values embed coerced paths and force the option machinery harder
     # than the check needs.
+    # `userSpecs` is already `--user SPEC` per account, because
+    # st_seed_users.py takes a REPEATABLE `--user` flag. A bare positional list
+    # makes argparse exit with "unrecognized arguments", and the accounts are
+    # then silently never seeded — the service still starts, just open to the
+    # world.
+    #
+    # Nothing explanatory may go inside the `''` string below: Nix comments are
+    # Nix comments, but a `#` line inside it becomes a SHELL comment, and one
+    # sitting between a `\` and its argument breaks the line continuation.
     + lib.optionalString (cfg.users != { }) ''
       echo "sillytavern: seeding declared accounts into ${cfg.dataRoot}" >&2
       ${lib.getExe python} ${seeder} \
         --data-root ${lib.escapeShellArg cfg.dataRoot} \
-        ${lib.escapeShellArgs (lib.attrValues (lib.mapAttrs mkUserArg resolvedUsers))}
+        ${lib.concatStringsSep " " (map (spec: "--user " + spec) userSpecs)}
     ''
 
     # The JSON state — settings.json, presets, themes, world books — is seeded
@@ -183,6 +208,11 @@ in
   imports = [ ./assertions.nix ];
 
   config = lib.mkIf cfg.enable {
+    # Exposed so the launcher can be realised and exercised directly, the
+    # same way `internal.packaged` is. `internal` is a `types.attrs` option,
+    # so this merges with config.nix's assignment rather than replacing it.
+    services.sillytavern-nixos.internal.serviceLauncher = serviceLauncher;
+
     users.users = lib.optionalAttrs (cfg.user != "root") {
       ${cfg.user} = {
         isSystemUser = true;
@@ -230,7 +260,10 @@ in
         # as `listOf str`, and a bare string fails with "expected a list but
         # found a string". The whole command line is one element, so the
         # rendering of `renderedArgv` stays a single shell-quoted word.
-        ExecStart = [ "${serviceLauncher}/bin/sillytavern-service ${lib.escapeShellArg renderedArgv}" ];
+        # `lib.getExe`, not a hard-coded path: the wrapper is a
+        # `writeShellApplication`, so it lives at $out/bin/<name>.
+        # A LIST: one element per argv entry, wrapper first.
+        ExecStart = [ (lib.getExe serviceLauncher) ] ++ cliArgvList;
 
         Restart = "on-failure";
         RestartSec = 5;
@@ -253,8 +286,6 @@ in
         User = cfg.user;
         Group = cfg.group;
         WorkingDirectory = packaged;
-
-        preStart = preStart;
 
         # See header note 3.
         StandardOutput = "journal";
@@ -344,6 +375,12 @@ in
 
       # The assembled-at-start secrets file, never a store path. See the
       # header note on secrets.
+
+      # Unit level, NOT serviceConfig. Inside serviceConfig it becomes a
+      # systemd directive named `PreStart=`, which systemd does not know, and
+      # the unit's own `preStart` option stays empty — so the seeder silently
+      # never runs.
+      preStart = preStart;
 
       restartTriggers = [ "sillytavern-package.path" ] ++ cfg.restartTriggers;
     } // cfg.systemdOverrides;
