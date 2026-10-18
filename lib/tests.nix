@@ -416,6 +416,81 @@ rec {
   # upstream's real document, which that check already round-trips through the
   # same parser. Synthetic cases would be a second, weaker source of truth.
 
+  # ── 4. Regression: `.common` options actually reach an account ────────────
+  #
+  # `settings.common` and `files.common` are documented as applying to EVERY
+  # account. They did not. `seedHandles` was the union of the `byUser` maps
+  # alone, so a configuration using nothing but `.common` produced a seed spec
+  # with `users: {}` — an EMPTY spec, and therefore a silent no-op at
+  # activation. No error, no warning, nothing seeded, for any configuration that
+  # did not happen to name a handle in one of the three `byUser` maps.
+  #
+  # It was worst in the default case: `config.enableUserAccounts` defaults to
+  # false, so `default-user` is the only account that exists, and the only way
+  # to reach it was `settings.byUser.default-user` — writing `byUser` to use
+  # something documented as applying to everyone.
+  #
+  # Asserted at EVAL time on `internal.seedSpecJson`, the parsed spec. No build
+  # and no store path: this check is `builtins.elem` over an attrset, so it
+  # cannot be defeated by a derivation that fails to build, and it fails with
+  # the actual handle list in the error.
+  seedSpecCoversCommon =
+    pkgs:
+    let
+      specOf =
+        module:
+        let s = (evalSystem pkgs module).config.services.sillytavern-nixos.internal.seedSpecJson;
+        in {
+          handles = builtins.attrNames s.users;
+          users = s.users;
+          # `or { }` rather than an `inherit`: before the fix this handle is
+          # absent entirely, and a hard attribute access would fail with
+          # "attribute 'default-user' missing" instead of reaching the `assert`
+          # that explains what went wrong.
+          defaultUser = s.users."default-user" or { };
+        };
+
+      # Case 1: the DEFAULT. No accounts, no `byUser` anywhere — the exact shape
+      # that silently seeded nothing. Only `default-user` can appear, and it
+      # must.
+      singleAccount = specOf {
+        services.sillytavern-nixos = {
+          enable = true;
+          settings.common = { main_api = "openai"; oai_settings.temp_openai = 0.77; };
+          files.common."instruct/Default.json".json = { name = "d"; content = "c"; };
+        };
+      };
+
+      # Case 2: accounts enabled, one declared, still nothing but `.common`.
+      # `alice` must be seeded — and `default-user` too, since the server
+      # creates it regardless once `enableUserAccounts` is on.
+      withAccount = specOf {
+        services.sillytavern-nixos = {
+          enable = true;
+          config.enableUserAccounts = true;
+          users.alice = { name = "Alice"; };
+          settings.common = { main_api = "openai"; };
+          files.common."themes/T.json".json = { palette = { }; };
+        };
+      };
+    in
+    # Case 1. `config.enableUserAccounts` is left at its default (false).
+    assert lib.elem "default-user" singleAccount.handles;
+    # ...and the CONTENT reached it, not merely the handle. An empty `settings`
+    # or `files` under a present handle is the same bug wearing a disguise.
+    assert singleAccount.defaultUser.settings.oai_settings.temp_openai == 0.77;
+    assert singleAccount.defaultUser.files != { };
+
+    # Case 2.
+    assert lib.elem "alice" withAccount.handles;
+    assert withAccount.users."alice".settings.main_api == "openai";
+    assert withAccount.users."alice".files."themes/T.json".json.palette == { };
+
+    pkgs.runCommand "sillytavern-check-seed-spec-covers-common" { } ''
+      echo "PASS seed-spec-covers-common (single-account: default-user; with-account: alice)"
+      touch "$out"
+    '';
+
   checks =
     pkgs:
     {
@@ -424,6 +499,7 @@ rec {
       browserLaunchDisabled = browserLaunchDisabled pkgs;
       secretsExcluded = secretsExcluded pkgs;
       assertionsAreWired = assertionsAreWired pkgs;
+      seedSpecCoversCommon = seedSpecCoversCommon pkgs;
       seeder = seeder pkgs;
     };
 

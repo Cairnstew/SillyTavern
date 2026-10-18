@@ -433,8 +433,13 @@ let
     ++ lib.attrNames cfg.secrets.byUser
   );
 
-  seedSpec = pkgs.writeText "sillytavern-seed-spec.json" (
-    builtins.toJSON {
+  # The spec as a Nix attrset, built once and rendered twice: `seedSpec` is the
+  # store file the activation script reads, `seedSpecJson` is the same value
+  # parsed back. Exposing the parsed form is what lets the `seedSpecCoversCommon`
+  # flake check assert at EVAL time with no build at all — the alternative is a
+  # `runCommand` that has to realise the file just to look at it, which makes the
+  # regression test for the seedHandles bug slow and depends on the builder.
+  seedSpecJson = {
       # Deliberately empty.
       #
       # `files.common` is documented as relative to each ACCOUNT's directory, and
@@ -466,9 +471,9 @@ let
           ) (cfg.secrets.byUser.${handle} or {});
         }
       );
-    }
-  );
+    };
 
+  seedSpec = pkgs.writeText "sillytavern-seed-spec.json" (builtins.toJSON seedSpecJson);
 
 in
 {
@@ -533,6 +538,7 @@ services.sillytavern-nixos.internal = {
   resolvedUsers = resolvedUsers;
   healthcheckEnv = healthcheckEnv;
   seedSpec = seedSpec;
+  seedSpecJson = seedSpecJson;
 };
 
     # An absolute `ssl.certPath` / `ssl.keyPath` pointing into the store paths
