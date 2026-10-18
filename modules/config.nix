@@ -410,8 +410,25 @@ let
   # in only one of them still gets seeded; assertions.nix then requires it to
   # be a declared account, so a typo cannot leave a stray directory in the
   # data root that SillyTavern would never adopt.
+  # Handles to seed. This is the union of:
+  #
+  #   * every DECLARED account — so `settings.common` and `files.common`, which
+  #     are documented as applying to EVERY account, actually reach them. They
+  #     used to be seeded only for handles that happened to appear in a `byUser`
+  #     map, which meant a config using nothing but `.common` produced an EMPTY
+  #     spec and silently did nothing. Verified: `users.seanc` +
+  #     `settings.common` with no `byUser` anywhere gave `users: {}`.
+  #   * `default-user`, which the server creates for itself on first start when
+  #     accounts are disabled. Without this, the single-account setup — the
+  #     DEFAULT, since `config.enableUserAccounts` defaults to false — was
+  #     unreachable entirely.
+  #   * anything named in a `byUser` map; assertions.nix requires those to be a
+  #     declared account or `default-user`, so they add nothing here but keep the
+  #     two derivations honest about each other.
   seedHandles = lib.unique (
-    lib.attrNames cfg.settings.byUser
+    lib.attrNames cfg.users
+    ++ [ "default-user" ]
+    ++ lib.attrNames cfg.settings.byUser
     ++ lib.attrNames cfg.files.byUser
     ++ lib.attrNames cfg.secrets.byUser
   );
