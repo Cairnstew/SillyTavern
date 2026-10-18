@@ -1,0 +1,110 @@
+# default.nix — the non-flake entry point.
+#
+# The top level is a plain ATTRSET, deliberately, because that is what makes the
+# obvious non-flake incantation work:
+#
+#   # in a non-flake configuration.nix
+#   imports = [
+#     (import (builtins.fetchTarball {
+#       url = "https://github.com/Cairnstew/nixos-sillytavern/archive/main.tar.gz";
+#     })).nixosModules.default
+#   ];
+#
+# Selecting `.nixosModules` straight off an `import` requires the imported file to
+# evaluate to an attrset. A function of `{ flake }` would fail with
+# `error: expected a set but found a function` while this file's own comment
+# advertised it. A function top level is only reachable as `(import path) { … }`,
+# which is the flake-compat calling convention; flake-compat is not how anyone
+# should consume this, because its job is to let a NON-flake consumer read a
+# consumer's flake outputs, and here the consumer is importing us directly.
+# `builtins.fetchTarball` is both simpler and the shape that works.
+#
+# What a non-flake consumer gets:
+#
+#   nixosModules.default                  the module, with `package` supplied
+#   nixosModules.sillytavern              the same module under a stable name
+#
+# The options live under `services.sillytavern-nixos`, NOT `services.sillytavern`:
+# nixos-unstable ships its own minimal module under that name and it cannot be
+# removed from a NixOS system. See modules/options.nix.
+#   homeModules.default                   the Home Manager half
+#   homeModules.sillytavern               the same module under a stable name
+#   lib                                   renderYaml / renderEnvFile / keyToEnv / …
+#   overlay                               adds pkgs.sillytavern
+#
+# Not bridged: `packages`, `apps`, `checks`, `devShells`, `formatter`. Those are
+# per-system flake outputs and need an instantiated package set; see the note on
+# `lib` below.
+let
+  # nixpkgs' `lib`, used ONLY for the shared helper library, which needs nothing
+  # beyond string/list/attrset functions.
+  #
+  # Deliberately NOT an instantiated package set. Building one here would mean
+  # choosing a channel behind the consumer's back and then handing the module a
+  # `pkgs` that is not theirs. The consumer's own nixpkgs decides licensing and
+  # unfree-ness, and they have to allow it regardless.
+  lib = (import <nixpkgs> { }).lib;
+
+  # `modules/sillytavern.nix` cannot reference `self`, because a flake input's
+  # module scope has no path back to its own flake. So `package` defaults to a
+  # clear error over there, and something has to fill it in.
+  #
+  # Built with `pkgs.callPackage` on the CONSUMER'S package set — the same trick
+  # flake.nix already uses. That matters: an earlier version of a sibling project
+  # imported `<nixpkgs>` here and handed the module its own package, which broke
+  # the moment the consumer passed their own `nixpkgs.pkgs`, with
+  # "attribute 'project-zomboid-server' missing". Deriving it from the module's
+  # own `pkgs` argument cannot go stale that way.
+  #
+  # `mkDefault`, so an explicit `package` set by the consumer still wins.
+  sillytavernModule =
+    { pkgs, ... }:
+    {
+      imports = [ ./modules/sillytavern.nix ];
+
+      config.services.sillytavern-nixos = {
+        # `src` explicitly: see the note in flake.nix about `callPackage`
+        # auto-filling a `src` argument from the package set.
+        package = lib.mkDefault (pkgs.callPackage ./pkgs/sillytavern {
+          src = ./.;
+          version = (lib.importJSON ./version.json).version;
+        });
+      };
+    };
+in
+{
+  # For `<nixpkgs-overlays>` consumers who want to reach the package from their
+  # own package set.
+  overlay = import ./overlay.nix;
+
+  nixosModules = {
+    default = sillytavernModule;
+    sillytavern = sillytavernModule;
+  };
+
+  # The Home Manager half, for the same reason the flake exposes it: the SillyTavern
+  # data root is a systemd `StateDirectory`, and a system module cannot install
+  # anything into a user's home directory.
+  #
+  # A plain Home Manager module — nothing for the caller to supply, unlike
+  # `sillytavernModule` above, which has to fill in `package`. It stays inert
+  # until a system config that provides the instance is in scope, because that is
+  # where it reads the URL and account names from.
+  homeModules = {
+    default = import ./modules/home.nix;
+    sillytavern = import ./modules/home.nix;
+  };
+
+  # The shared library the flake exports as `self.lib`: `renderYaml`,
+  # `renderEnvFile`, `renderCliArgv`, `keyToEnv`, `userKeyFor`, `mkUserArg`,
+  # `mkProxyUpstream`. A consumer writing their own integration, or merging
+  # rendered config into something else, wants these.
+  #
+  # `lib.tests` is deliberately absent: it calls `nixpkgs.lib.nixosSystem`, which
+  # lives in nixpkgs' *own* `lib` output and not in the instantiated package set's
+  # — `(import <nixpkgs> {}).lib ? nixosSystem` is `false`. Reaching the full `lib`
+  # without flakes means reaching into `<nixpkgs>`' internals, so `tests` stays a
+  # flake-only output. Call `nixpkgs.lib.nixosSystem` directly instead, which is
+  # what any real non-flake configuration does anyway.
+  lib = import ./lib { inherit lib; };
+}
