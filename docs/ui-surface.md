@@ -572,6 +572,25 @@ written by `seedContent`), and `_errors/`. None of them are configuration.
 
 ---
 
+## 5a. Open items
+
+Everything here is deliberately NOT done. Each says who owns the decision and
+what it would take.
+
+| # | Item | Owner | Status |
+|---|---|---|---|
+| 1 | **`home-manager` flake input.** `nix-tests/home-eval.sh` pins revision `640725978` and fetches it over the network, because adding an input is a policy decision. | owner | **pending decision.** If added, swap the fetch for the flake input and delete the fetch. |
+| 2 | **Rename to `-nixos` (option 1 in §4.1.5).** Unit, account and `StateDirectory` all become `sillytavern-nixos`. Breaking: loses the `sillytavern.service` name and `/var/lib/sillytavern`. | owner | **not scheduled.** Ship the assertion first — done — then the rename in a major. |
+| 3 | **`configYamlRoundTrip` unverified on this host.** | — | **blocked environmentally.** npm is behind a TLS-intercepting proxy; see §4.2. Needs one green run on an unproxied host (CI). |
+| 4 | **`noCrossModuleReads` is a grep.** | — | **permanent limitation**, not a bug. Cannot see dynamic access through a variable, concatenated paths, or anything outside `modules/` and `lib/`. |
+| 5 | **Upstream locale issue.** Draft written in §5.1. | owner | **drafted, NOT filed.** |
+| 6 | **`modules/home.nix` has no check in `nix flake check`.** | — | Covered by `nix-tests/home-eval.sh` instead, which needs network. Moving it in depends on item 1. |
+
+Items 3 and 4 are properties of the environment and the technique, not
+outstanding work. Items 1, 2, 5 and 6 are waiting on a decision.
+
+---
+
 ## 6. Reproducing this map
 
 ```bash
