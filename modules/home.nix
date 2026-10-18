@@ -27,10 +27,30 @@
 
 let
   cfg = config.sillytavern;
-  instance = osConfig.services.sillytavern or null;
+
+  # `services.sillytavern-nixos`, NOT `services.sillytavern`.
+  #
+  # nixos-unstable ships its own `services.sillytavern` module, so that option
+  # path EXISTS in any system that has nixpkgs' module set — reading it here
+  # silently picked up the wrong module. It then had no `config` sub-option at
+  # all, so `instance.config.ssl.enabled` was a hard evaluation error:
+  #
+  #     error: attribute 'config' missing
+  #     at modules/home.nix:47:34
+  #
+  # Which means this module could not be evaluated at all whenever a SillyTavern
+  # instance was in scope. It only ever "worked" in the one case where it could
+  # not: no instance, so `instance` was null and the URL fell back to
+  # http://localhost:8000. The `or null` fallback hid the bug behind the exact
+  # configuration it was supposed to help with.
+  instance = osConfig.services.sillytavern-nixos or null;
+
+  # An instance that exists but is switched off is as unusable as none at all,
+  # and the distinction matters for the warning below.
+  instanceEnabled = instance != null && instance.enable;
 
   # Only usable when the system actually runs one.
-  enabled = cfg.enable && instance != null;
+  enabled = cfg.enable && instanceEnabled;
 
   # `nixos` gives the port; falling back to upstream's 8000 keeps the module
   # usable against a system config that has not been evaluated with this flake.
@@ -140,10 +160,25 @@ in
         Nothing will be written to home.packages.
       '')
       ++ (lib.optional (cfg.enable && instance == null) ''
-        sillytavern.enable is set but no `services.sillytavern` instance was
+        sillytavern.enable is set but no `services.sillytavern-nixos` module was
         found in the system configuration, so the URL and port fall back to
-        http://localhost:8000. Import the NixOS module too, or set
-        `sillytavern.url` explicitly.
+        http://localhost:8000. Import the NixOS module too
+        (`inputs.<name>.nixosModules.default`), or set `sillytavern.url`.
+      '')
+      ++ (lib.optional (cfg.enable && instance != null && !instance.enable) ''
+        sillytavern.enable is set but `services.sillytavern-nixos.enable` is false
+        on the system, so there is no instance to reach. The URL is still derived
+        from the system config, but nothing will be listening on it.
+      '')
+      # The seedHandles lesson, applied here: an option that is enabled but
+      # produces no observable output is indistinguishable from a typo. Both
+      # outputs (`sillytavern-open`, `sillytavern-login`) are opt-in and default
+      # to false, so `sillytavern = { enable = true; }` on its own silently does
+      # nothing at all.
+      ++ (lib.optional (cfg.enable && !cfg.openInBrowser && !cfg.loginScript) ''
+        sillytavern.enable is set but neither sillytavern.openInBrowser nor
+        sillytavern.loginScript is, and both default to false — so this module
+        currently produces no output at all. Set one of them.
       '');
 
     home.packages =
