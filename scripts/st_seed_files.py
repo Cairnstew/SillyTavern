@@ -32,12 +32,19 @@ Spec format (JSON):
       "users": {
         "<handle>": {
           "settings": { <deep-merged into settings.json> },
-          "files":    { "<rel path>": {"json": …} | {"path": …} }
+          "files":    { "<rel path>": {"json": …} | {"path": …} },
+          "secrets":  { "<SECRET_KEY>": {"value": "/run/agenix/…", "label": "work"} }
         }
       }
     }
 
 Only `users` carries `settings`; `settings.json` is per-account by construction.
+
+`secrets` is `secrets.json`, where SillyTavern 1.19 keeps every provider API key
+(`api_key_openai`, `api_key_claude`, `api_key_novel`, ...). Its `value` is a
+PATH, never a literal: a secret must not pass through the Nix store, so the
+rendered spec carries `/run/agenix/...` and the bytes are read here, at
+activation time.
 """
 
 from __future__ import annotations
@@ -47,11 +54,18 @@ import json
 import os
 import sys
 import tempfile
+import uuid
 from typing import Any
 
 # Written by the server as it runs. Never configuration, never ours.
-RESERVED_BASENAMES = frozenset({"stats.json", "config.yaml"})
-RESERVED_TOP_LEVEL = frozenset({"_storage", "_webpack", "_errors", "_sc", "backups"})
+# `secrets.json` is reserved because it has its own `secrets` mechanism below,
+# not because it is runtime state: it must be reachable through that mechanism
+# so the value can be sourced from a file rather than rendered into the store.
+RESERVED_BASENAMES = frozenset({"stats.json", "config.yaml", "secrets.json"})
+# `_cache` is the transformers.js model cache (`DATA_ROOT/_cache`, see
+# src/transformers.js) — hundreds of MiB of downloaded ONNX weights, pure
+# runtime state, and never something a spec should be able to declare.
+RESERVED_TOP_LEVEL = frozenset({"_storage", "_webpack", "_errors", "_sc", "_cache", "backups"})
 
 # settings.json holds whatever the UI put there, including API keys typed into
 # the connection panel. Seeded files are owner-only.
@@ -228,6 +242,102 @@ def seed_settings(
         _log(f"merged settings.json ({len(merged)} keys)")
 
 
+def seed_secrets(
+    user_dir: str, secrets: dict, policy: str, dry_run: bool, stats: dict
+) -> None:
+    """Merge declared provider API keys into an account's `secrets.json`.
+
+    The on-disk shape is NOT a flat map. `src/endpoints/secrets.js` stores an
+    array of `{id, value, label, active}` per key so a key can be rotated
+    without losing the old one, and only the entry with `active: true` is sent
+    upstream. So this preserves every existing entry for a key and only touches
+    the active slot, which means:
+
+      * a key with no existing entries gets one active entry;
+      * a key whose active entry already has our value is left alone, so this
+        is idempotent across `nixos-rebuild`;
+      * under `overwrite`, the previously-active entry is DEACTIVATED rather
+        than deleted, keeping the history the UI's key manager expects.
+
+    Values are read from a file, never inlined: the spec only carries a path so
+    the secret itself never enters the Nix store.
+    """
+    target = os.path.join(user_dir, "secrets.json")
+    existing: dict = {}
+    if os.path.exists(target):
+        try:
+            with open(target, "r", encoding="utf-8") as fh:
+                loaded = json.load(fh)
+            if isinstance(loaded, dict):
+                existing = loaded
+            else:
+                raise SeedError(f"{target} is not a JSON object")
+        except json.JSONDecodeError as exc:
+            raise SeedError(
+                f"{target} is not valid JSON ({exc}); refusing to touch it"
+            ) from exc
+
+    merged = dict(existing)
+    changed = False
+    for key, spec in secrets.items():
+        if not isinstance(spec, dict) or "value" not in spec:
+            raise SeedError(
+                f"secrets.{key} must be {{ value = <path>; label = …; }}, got {spec!r}"
+            )
+        src = spec["value"]
+        if not isinstance(src, str):
+            raise SeedError(f"secrets.{key}.value must be a path string")
+        try:
+            with open(src, "r", encoding="utf-8") as fh:
+                # Trailing newlines are an artefact of how the secret file was
+                # written; an API key with a stray \n fails auth with a 401
+                # that looks like a bad key.
+                value = fh.read().strip()
+        except OSError as exc:
+            raise SeedError(
+                f"secrets.{key}: cannot read {src} ({exc}). A secret file is "
+                f"missing when agenix has not decrypted it yet — check the "
+                f"agenix service, or that this handle is declared on a host "
+                f"that has the key."
+            ) from exc
+
+        label = spec.get("label", key)
+        entries = list(merged.get(key) or [])
+        active = next((e for e in entries if isinstance(e, dict) and e.get("active")), None)
+
+        if active is not None and active.get("value") == value:
+            stats["skipped"] += 1
+            continue
+
+        if active is not None and policy == "missing":
+            # An operator added this key through the UI. Respect that.
+            stats["skipped"] += 1
+            continue
+
+        if active is not None:
+            # `overwrite`: retire the old entry, keep it for the key manager's
+            # history, and add ours as the new active one.
+            entries = [
+                {**e, "active": False} if isinstance(e, dict) and e.get("active") else e
+                for e in entries
+            ]
+        entries.append(
+            {"id": str(uuid.uuid4()), "value": value, "label": label, "active": True}
+        )
+        merged[key] = entries
+        changed = True
+        stats["written"] += 1
+        if not dry_run:
+            _log(f"seeded secret {key} ({label})")
+
+    if not changed:
+        return
+    # The server writes this with a 4-space indent and no trailing newline.
+    write_atomic(
+        target, json.dumps(merged, indent=4, ensure_ascii=False).encode("utf-8"), dry_run
+    )
+
+
 def apply_spec(spec: dict, data_root: str, policy: str, dry_run: bool) -> dict:
     stats = {"written": 0, "skipped": 0}
 
@@ -241,6 +351,9 @@ def apply_spec(spec: dict, data_root: str, policy: str, dry_run: bool) -> dict:
         settings = userspec.get("settings") or {}
         if settings:
             seed_settings(user_dir, settings, policy, dry_run, stats)
+        secrets = userspec.get("secrets") or {}
+        if secrets:
+            seed_secrets(user_dir, secrets, policy, dry_run, stats)
         for rel, content in (userspec.get("files") or {}).items():
             seed_file(user_dir, rel, content, policy, dry_run, stats)
 

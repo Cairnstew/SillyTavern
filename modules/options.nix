@@ -150,6 +150,32 @@ let
     };
   });
 
+  # One entry in an account's `secrets.json`: a provider API key, sourced from a
+  # file. See the `secrets.byUser` option for why the value is a path and never a
+  # literal.
+  secretEntry = types.submodule ({ name, ... }: {
+    options = {
+      value = mkOption {
+        type = types.path;
+        example = literalExpression "config.age.secrets.openai_api_key.path";
+        description = ''
+          File whose CONTENTS are the API key. The value itself is never stored
+          in Nix: only this path is, and the bytes are read at activation.
+
+          Use `config.age.secrets.<name>.path` (decrypted to `/run/agenix/<name>`)
+          so the key is encrypted at rest in the repo and readable only by the
+          service account.
+        '';
+      };
+      label = mkOption {
+        type = types.str;
+        default = name;
+        example = "work";
+        description = "Human-readable label shown in the UI's key manager. Defaults to the key name.";
+      };
+    };
+  });
+
   hardware = types.submodule {
     options = {
       memoryMax = mkOption {
@@ -1904,6 +1930,60 @@ in
         Either way, `stats.json` and `backups/` are never written — they are
         server runtime state, not configuration.
       '';
+    };
+
+    # ── Provider API keys ─────────────────────────────────────────────────────
+    #
+    # 1.19 moved every provider key OUT of `settings.json` and into a
+    # per-account `secrets.json`, shaped
+    #   { "<key>": [ { id, value, label, active }, … ] }
+    # because a key must be rotatable without losing the old one, and only the
+    # `active` entry is sent upstream. The keys are the `SECRET_KEYS` table in
+    # public/scripts/secrets.js — `api_key_openai`, `api_key_claude`,
+    # `api_key_novel`, and ~20 more.
+    #
+    # This option exists so those keys are Nix-driven. There is no other route:
+    # `files.byUser."secrets.json"` is rejected, and putting a key in
+    # `settings.json` does not work because the server no longer reads it there.
+
+    secrets = {
+      byUser = mkOption {
+        type = types.attrsOf (types.attrsOf secretEntry);
+        default = { };
+        example = literalExpression ''
+          {
+            seanc = {
+              api_key_openai = {
+                value = config.age.secrets.openai_api_key.path;
+                label = "personal";
+              };
+              api_key_claude.value = config.age.secrets.anthropic_api_key.path;
+            };
+            # The single-account case still needs an account, even though the
+            # server would also accept `default-user`.
+            default-user.api_key_openai.value = config.age.secrets.openai_api_key.path;
+          }
+        '';
+        description = ''
+          Provider API keys to seed into each account's `secrets.json`, keyed by
+          account HANDLE and then by SillyTavern's own `SECRET_KEYS` name.
+
+          `value` is a PATH to a file containing the key, never the key itself —
+          a literal would be copied into the Nix store, which is world-readable.
+          Source it from agenix (`config.age.secrets.<name>.path`, decrypted to
+          `/run/agenix/<name>`) or any other file you control.
+
+          Each entry is written as an `{id, value, label, active: true}` record,
+          matching what the UI's key manager reads, so the key is usable in the
+          browser exactly as if it had been typed there.
+
+          Seeding is idempotent and does not disturb the UI: a key already active
+          with this value is left alone, and under the default
+          `seedPolicy = "missing"` a key you added through the UI is never
+          overridden. `overwrite` deactivates the previous entry — it does not
+          delete it, so the UI's key history still works.
+        '';
+      };
     };
 
     # ── Plugins and extensions ────────────────────────────────────────────────

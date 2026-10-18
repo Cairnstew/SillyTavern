@@ -410,7 +410,11 @@ let
   # in only one of them still gets seeded; assertions.nix then requires it to
   # be a declared account, so a typo cannot leave a stray directory in the
   # data root that SillyTavern would never adopt.
-  seedHandles = lib.unique (lib.attrNames cfg.settings.byUser ++ lib.attrNames cfg.files.byUser);
+  seedHandles = lib.unique (
+    lib.attrNames cfg.settings.byUser
+    ++ lib.attrNames cfg.files.byUser
+    ++ lib.attrNames cfg.secrets.byUser
+  );
 
   seedSpec = pkgs.writeText "sillytavern-seed-spec.json" (
     builtins.toJSON {
@@ -434,6 +438,15 @@ let
           # account having to restate the rest of its tree.
           settings = cfg.settings.common // (cfg.settings.byUser.${handle} or {});
           files = cfg.files.common // (cfg.files.byUser.${handle} or {});
+          # PATHS ONLY. A secret's bytes are read by the seeder at activation,
+          # so nothing about the key itself reaches this file, the store, or
+          # `nixos-rebuild` output.
+          secrets = lib.mapAttrs (
+            _key: entry: {
+              inherit (entry) label;
+              value = toString entry.value;
+            }
+          ) (cfg.secrets.byUser.${handle} or {});
         }
       );
     }

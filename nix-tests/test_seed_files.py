@@ -257,6 +257,177 @@ class SettingsMergeTests(unittest.TestCase):
             seeder.seed_settings(str(self.user), {"a": 1}, "overwrite", False, self.stats)
 
 
+class SecretsTests(unittest.TestCase):
+    """`secrets.json` — the provider API keys 1.19 moved out of settings.json."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.user = self.root / "seanc"
+        self.user.mkdir()
+        self.stats = {"written": 0, "skipped": 0}
+        self.keyfile = self.root / "openai.key"
+        self.keyfile.write_text("sk-live-ABCDEF\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def seed(self, secrets, policy="missing"):
+        return seeder.seed_secrets(str(self.user), secrets, policy, False, self.stats)
+
+    def secrets_json(self):
+        return json.loads((self.user / "secrets.json").read_text())
+
+    # ── shape ─────────────────────────────────────────────────────────────────
+
+    def test_writes_the_shape_the_server_reads(self):
+        # src/endpoints/secrets.js stores an ARRAY per key and only sends the
+        # `active` entry upstream, so a flat map would be silently ignored.
+        self.seed({"api_key_openai": {"value": str(self.keyfile)}})
+        doc = self.secrets_json()
+        self.assertEqual(list(doc), ["api_key_openai"])
+        entry = doc["api_key_openai"][0]
+        self.assertEqual(entry["value"], "sk-live-ABCDEF")
+        self.assertTrue(entry["active"])
+        self.assertEqual(entry["label"], "api_key_openai")
+        self.assertTrue(entry["id"])  # uuid, so the UI can address the entry
+
+    def test_label_defaults_to_the_key(self):
+        self.seed({"api_key_claude": {"value": str(self.keyfile)}})
+        self.assertEqual(self.secrets_json()["api_key_claude"][0]["label"], "api_key_claude")
+
+    def test_label_can_be_set(self):
+        self.seed({"api_key_claude": {"value": str(self.keyfile), "label": "work"}})
+        self.assertEqual(self.secrets_json()["api_key_claude"][0]["label"], "work")
+
+    def test_strips_the_trailing_newline(self):
+        # An API key with a stray \n 401s, which is indistinguishable from a
+        # bad key in every provider's error message.
+        self.seed({"api_key_novel": {"value": str(self.keyfile)}})
+        self.assertEqual(self.secrets_json()["api_key_novel"][0]["value"], "sk-live-ABCDEF")
+
+    def test_indent_matches_what_the_server_writes(self):
+        # _writeSecretsFile uses 4 spaces and no trailing newline.
+        self.seed({"api_key_openai": {"value": str(self.keyfile)}})
+        raw = (self.user / "secrets.json").read_text()
+        # `id` is the 3rd level of nesting, so it sits at 12 spaces.
+        self.assertIn('\n            "id"', raw)
+        self.assertFalse(raw.endswith("\n"))
+
+    # ── safety ────────────────────────────────────────────────────────────────
+
+    def test_never_reads_a_value_outside_the_spec(self):
+        # The spec carries a PATH. There is no code path that inlines a literal,
+        # which is what keeps the key out of the Nix store.
+        self.seed({"api_key_openai": {"value": str(self.keyfile)}})
+        self.assertNotIn("/tmp", json.dumps(self.secrets_json()))
+
+    def test_refuses_a_missing_key_file_with_a_pointed_message(self):
+        with self.assertRaises(seeder.SeedError) as ctx:
+            self.seed({"api_key_openai": {"value": str(self.root / "nope")}})
+        msg = str(ctx.exception)
+        self.assertIn("api_key_openai", msg)
+        self.assertIn("agenix", msg)  # the likely cause, named
+
+    def test_refuses_an_entry_without_a_value(self):
+        with self.assertRaises(seeder.SeedError):
+            self.seed({"api_key_openai": {"label": "work"}})
+
+    def test_refuses_to_touch_a_corrupt_secrets_file(self):
+        (self.user / "secrets.json").write_text("{not json")
+        with self.assertRaises(seeder.SeedError):
+            self.seed({"api_key_openai": {"value": str(self.keyfile)}})
+
+    def test_secrets_json_cannot_be_seeded_through_files(self):
+        # Otherwise there are two writers for one file.
+        for rel in ("secrets.json", "sub/secrets.json"):
+            with self.assertRaises(seeder.SeedError):
+                seeder.safe_join(str(self.root), rel)
+
+    # ── idempotence and UI interaction ────────────────────────────────────────
+
+    def test_second_run_is_a_no_op(self):
+        self.seed({"api_key_openai": {"value": str(self.keyfile)}})
+        first = (self.user / "secrets.json").read_text()
+        self.stats["written"] = self.stats["skipped"] = 0
+        self.seed({"api_key_openai": {"value": str(self.keyfile)}})
+        self.assertEqual((self.user / "secrets.json").read_text(), first)
+        self.assertEqual(self.stats["written"], 0)
+        self.assertEqual(self.stats["skipped"], 1)
+
+    def test_does_not_override_a_key_set_in_the_ui_by_default(self):
+        (self.user / "secrets.json").write_text(
+            json.dumps({"api_key_openai": [{"id": "x", "value": "typed-by-hand", "label": "ui", "active": True}]})
+        )
+        self.seed({"api_key_openai": {"value": str(self.keyfile)}})
+        entries = self.secrets_json()["api_key_openai"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["value"], "typed-by-hand")
+
+    def test_overwrite_deactivates_rather_than_deletes(self):
+        # The UI's key manager shows history; deleting an entry loses it.
+        (self.user / "secrets.json").write_text(
+            json.dumps({"api_key_openai": [{"id": "old", "value": "typed-by-hand", "label": "ui", "active": True}]})
+        )
+        self.seed({"api_key_openai": {"value": str(self.keyfile)}}, policy="overwrite")
+        entries = self.secrets_json()["api_key_openai"]
+        self.assertEqual(len(entries), 2)
+        self.assertFalse(entries[0]["active"])
+        self.assertEqual(entries[0]["value"], "typed-by-hand")
+        self.assertTrue(entries[1]["active"])
+
+    def test_preserves_other_keys_and_inactive_history(self):
+        (self.user / "secrets.json").write_text(
+            json.dumps(
+                {
+                    "api_key_claude": [
+                        {"id": "a", "value": "old", "label": "l", "active": False},
+                        {"id": "b", "value": "current", "label": "l", "active": True},
+                    ]
+                }
+            )
+        )
+        self.seed({"api_key_openai": {"value": str(self.keyfile)}})
+        doc = self.secrets_json()
+        self.assertEqual(sorted(doc), ["api_key_claude", "api_key_openai"])
+        self.assertEqual(len(doc["api_key_claude"]), 2)  # untouched
+
+    def test_multiple_keys_in_one_pass(self):
+        other = self.root / "claude.key"
+        other.write_text("sk-ant-XYZ")
+        self.seed(
+            {
+                "api_key_openai": {"value": str(self.keyfile)},
+                "api_key_claude": {"value": str(other)},
+            }
+        )
+        doc = self.secrets_json()
+        self.assertEqual(doc["api_key_openai"][0]["value"], "sk-live-ABCDEF")
+        self.assertEqual(doc["api_key_claude"][0]["value"], "sk-ant-XYZ")
+
+    # ── through the full spec ─────────────────────────────────────────────────
+
+    def test_reachable_through_apply_spec(self):
+        spec = {"users": {"seanc": {"secrets": {"api_key_openai": {"value": str(self.keyfile)}}}}}
+        seeder.apply_spec(spec, str(self.root), "missing", False)
+        self.assertEqual(self.secrets_json()["api_key_openai"][0]["value"], "sk-live-ABCDEF")
+
+    def test_settings_and_secrets_coexist_in_one_spec(self):
+        spec = {
+            "users": {
+                "seanc": {
+                    "settings": {"main_api": "custom"},
+                    "secrets": {"api_key_openai": {"value": str(self.keyfile)}},
+                }
+            }
+        }
+        seeder.apply_spec(spec, str(self.root), "missing", False)
+        self.assertEqual(
+            json.loads((self.user / "settings.json").read_text())["main_api"], "custom"
+        )
+        self.assertIn("api_key_openai", self.secrets_json())
+
+
 class CliTests(unittest.TestCase):
     """End-to-end through main(), which is what the preStart script runs."""
 

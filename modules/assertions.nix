@@ -25,7 +25,19 @@ let
   # `default-user` is created by the server itself on first start, so it is a
   # legitimate seed target without being a declared account.
   declaredHandles = builtins.attrNames cfg.users ++ [ "default-user" ];
-  seedHandles = lib.unique (lib.attrNames cfg.settings.byUser ++ lib.attrNames cfg.files.byUser);
+  seedHandles = lib.unique (
+    lib.attrNames cfg.settings.byUser
+    ++ lib.attrNames cfg.files.byUser
+    ++ lib.attrNames cfg.secrets.byUser
+  );
+
+  # Flattened { handle, key, entry } triples so one bad entry reports its exact
+  # location instead of failing with an opaque `mapAttrs` type error.
+  secretEntries = lib.concatLists (
+    lib.mapAttrsToList (
+      handle: lib.mapAttrsToList (key: entry: { inherit handle key entry; })
+    ) cfg.secrets.byUser
+  );
 in
 {
   assertions = [
@@ -65,6 +77,47 @@ in
         `json` writes the value literally; `path` copies a file from the store.
         Setting both is ambiguous and setting neither has no meaning, so both are
         rejected rather than guessed at.
+      '';
+    }
+    {
+      # Two routes to the same file would race at activation and one would
+      # silently win, depending on ordering inside `apply_spec`. `secrets.json`
+      # is also the one file whose shape the `secrets` mechanism owns, so a
+      # hand-written `files` entry could put it in a shape the server rejects.
+      assertion = lib.all (rel: builtins.baseNameOf rel != "secrets.json")
+        (lib.attrNames cfg.files.common ++ lib.concatLists (lib.attrValues (lib.mapAttrs lib.attrNames cfg.files.byUser)));
+      message = ''
+        services.sillytavern-nixos: do not seed `secrets.json` through `files`.
+
+        Use `services.sillytavern-nixos.secrets.byUser.<handle>.<key>.value`
+        instead. It writes the `{id, value, label, active}` record shape the
+        server actually reads, takes the key from a file so it never reaches the
+        store, and will not fight the key you set in the UI.
+
+        Declared here: ${lib.concatStringsSep ", " (
+          lib.filter (rel: builtins.baseNameOf rel == "secrets.json")
+            (lib.attrNames cfg.files.common ++ lib.concatLists (lib.attrValues (lib.mapAttrs lib.attrNames cfg.files.byUser)))
+        )}
+      '';
+    }
+    {
+      # A secret whose value is not a readable file fails at activation with a
+      # Python traceback. Caught here instead, where the message can name the
+      # handle and key.
+      assertion = lib.all (e: builtins.pathExists e.entry.value) secretEntries;
+      message = ''
+        services.sillytavern-nixos: every `secrets.byUser` value must be a path
+        that exists at evaluation time.
+
+        Missing: ${lib.concatStringsSep ", " (
+          lib.map (e: "${e.handle}.${e.key} = ${e.entry.value}")
+            (lib.filter (e: !builtins.pathExists e.entry.value) secretEntries)
+        )}
+
+        `value` is the file the key is read FROM, so it has to be a real path.
+        For agenix this is `config.age.secrets.<name>.path`, which exists only
+        once the age identity file is readable — check `age.secrets.age.identity
+        .path` exists, or decrypt once with `agenix -d`.
       '';
     }
 

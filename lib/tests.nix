@@ -401,7 +401,11 @@ rec {
         cp -r ${../scripts} ./scripts
         chmod -R u+w ./nix-tests ./scripts
         cd ./nix-tests
+        # BOTH suites. `test_seed_files.py` was written alongside the first and
+        # never wired in here, so the JSON seeding path — settings merge, path
+        # confinement, secrets.json — had passing tests that CI never ran.
         python3 test_seed_users.py
+        python3 test_seed_files.py
         touch "$out"
       '';
 
