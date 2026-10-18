@@ -235,6 +235,11 @@ This bit twice, and both instances are now fixed:
 | `modules/home.nix` | read `osConfig.services.sillytavern`, got nixpkgs' module, which has no `config` sub-option → `error: attribute 'config' missing`, a **hard eval failure**. The module could not be built at all with an instance in scope. |
 | `lib/default.nix` (`mkProxyUpstream`) | same mistake in an **exported** flake lib function, so the example documented on the `proxyUpstreams` option failed to evaluate for anyone following it. |
 
+`21e84086b` bundles the `mkProxyUpstream` fix together with the home-manager
+eval harness — two unrelated changes in one commit. It is left that way on
+purpose: this document cites that hash, and splitting it would leave dangling
+references here.
+
 Two things made each hard to see:
 
 1. **`or null` hid it.** The fallback meant the module only ever "worked" in the
