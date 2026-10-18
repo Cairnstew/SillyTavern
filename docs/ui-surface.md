@@ -252,6 +252,105 @@ Rule of thumb for this repo: any option path read from *another* module's
 namespace is `services.sillytavern-nixos`, full stop. A sweep of every `or null`
 / `or {}` in the module is recorded in the `21e84086b` commit message.
 
+### 4.1.1 Collision inventory (verified against nixpkgs `fe132422`)
+
+`nixos/modules/services/web-apps/sillytavern.nix`, registered in
+`module-list.nix:1858`, so it is **always in scope** — every NixOS system
+imports the whole module list whether or not anyone wants it.
+
+| Surface | nixpkgs | this module | Collides? |
+|---|---|---|---|
+| Option namespace | `services.sillytavern` | `services.sillytavern-nixos` | No — distinct attrs |
+| `systemd.services.sillytavern` | declared | declared (`modules/services.nix:234`) | **YES** |
+| `users.users.sillytavern` | `isSystemUser` | same account | **YES** (description also differs) |
+| `serviceConfig.StateDirectory` | `"SillyTavern"` | `"sillytavern"` | **YES** |
+| `serviceConfig.Restart` | `"always"` | `"on-failure"` | **YES** — this is what surfaces first |
+| `users.users.sillytavern.description` | `"sillytavern service user"` | `"SillyTavern LLM front-end server"` | **YES** |
+| port | `null` (passed as a flag) | `config.port`, default `8000` | No |
+| tmpfiles | `settings.sillytavern` → `/var/lib/SillyTavern/{data,extensions}` + config symlink | none | No, but stray dirs appear |
+| extra units | none | `sillytavern-package`, `sillytavern-healthcheck` | No |
+
+Verified that nixpkgs' `config` is a **single `lib.mkIf cfg.enable`** (line 93)
+with all four declarations inside and nothing unconditional, so
+`enable = false` genuinely contributes nothing.
+
+### 4.1.2 What happens today, both enabled
+
+Fails at **eval** time — loud, but naming the wrong cause:
+
+```
+error: The option `systemd.services.sillytavern.serviceConfig.Restart' has
+conflicting definition values:
+  - nixpkgs: "always"
+  - ours:   "on-failure"
+```
+
+Forcing past it (`Restart` and `StateDirectory`) produces a merged unit whose
+`ExecStart` is:
+
+```
+[ ".../sillytavern-1.19.0/bin/sillytavern",           <- nixpkgs' binary
+  ".../sillytavern-service/bin/sillytavern-service",   <- OUR wrapper
+  "--configPath=/nix/store/...-sillytavern-config.yaml",
+  "--dataRoot=/var/lib/sillytavern" ]
+```
+
+⚠ **INFERRED, NOT OBSERVED.** The `ExecStart` list is what the module system
+computes and was read back from an evaluated system. "This would not start"
+is inference from that shape — no boot was attempted.
+
+So the risk is not that it fails; it is that the error names `Restart` rather
+than "two modules own one unit", and forcing past it *looks* reasonable.
+
+### 4.1.3 Status
+
+Done: an assertion rejects the combination, with a message that names the real
+cause, the three contested surfaces, which namespace is ours, and what to do.
+`!cfg.enable || !upstreamEnabled` — the `cfg.enable` arm matters because
+`modules/sillytavern.nix` imports `assertions.nix` **unconditionally**, so
+without it a user running nixpkgs' module alone would be blocked by a module
+they never enabled.
+
+Backed by `upstreamCollisionAsserted` (four cases against the real nixpkgs
+module) and `noCrossModuleReads` (grep for the cross-namespace read).
+
+### 4.1.4 Planned breaking change — renaming to `-nixos`, NOT implemented
+
+Agreed direction, deliberately **not** done here because it is breaking.
+
+Rename all three surfaces to `sillytavern-nixos`:
+
+```
+systemd.services.sillytavern-nixos
+users.users.sillytavern-nixos
+StateDirectory = "sillytavern-nixos"
+```
+
+For: structurally impossible to collide, and it matches the option namespace
+already chosen. Against: existing deployments lose the `sillytavern.service`
+name and `/var/lib/sillytavern`.
+
+**Migration for existing users:**
+
+1. `systemctl disable sillytavern.service` before the first switch — otherwise
+   the old unit's state directory is orphaned, not migrated.
+2. Move the data, OR keep the old location via
+   `stateDirectory = "sillytavern";` (the option already exists and
+   `dataRoot` derives from it, so a one-line override keeps the data). The
+   override is the low-risk path and should be documented as the recommended
+   first step.
+3. Note that the *account* rename changes ownership of `/var/lib/sillytavern`;
+   either chown it or set `user = "sillytavern"` to keep it.
+
+Sequencing: the assertion ships first (this commit) so the failure mode is
+actionable in the meantime; the rename goes in the next major.
+
+Rejected: building *on* nixpkgs' module. It hardcodes
+`${package}/lib/node_modules/sillytavern/config.yaml`, passes flags as one
+quoted string (the exact bug this module exists to fix), and has no account
+seeding, JSON state, or secrets. Adopting it would mean discarding
+`modules/services.nix`, both seeders, and the entire JSON layer.
+
 ### 4.2 `configYamlRoundTrip` is UNVERIFIED on this host
 
 > Do not read the green `nix flake check --no-build` as this check passing.
