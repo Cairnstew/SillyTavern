@@ -7,7 +7,7 @@
 #   nixosModules.sillytavern   the module
 #   homeModules.sillytavern   the Home Manager half
 #   packages.<system>.sillytavern
-#   packages.<system>.sillytavern-config-check   renders the default config.yaml
+#   packages.<system>.default       the same package; what `nix flake check` builds
 #   overlays.default          adds pkgs.sillytavern
 #   lib                       the shared renderers
 #   devShells.default         nodejs + npm + python3 + the app's toolchain
@@ -122,6 +122,18 @@
         in
         {
           sillytavern = (overlay pkgs pkgs).sillytavern;
+
+          # `nix flake check` builds `packages.<system>.default` and NOTHING
+          # else in `packages`. Without this attribute it built no package at
+          # all, and every check in `lib/tests.nix` is evaluation-time or pure
+          # Python — so a broken `installPhase`, a stale `nodeModulesHash`, or a
+          # `fetchgit` that has drifted all passed the suite green.
+          #
+          # That is not hypothetical: `overlay.nix` failed to EVALUATE
+          # (callPackage injected `pkgs.src`) for exactly as long as this
+          # attribute was missing, and nothing caught it. One line here is what
+          # makes the suite able to.
+          default = self.packages.${system}.sillytavern;
         }
         // (import ./lib/tests.nix { inherit lib nixpkgs; }).packages pkgs
       );
