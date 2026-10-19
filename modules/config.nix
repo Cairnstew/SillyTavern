@@ -105,20 +105,30 @@ let
       # actively confusing when auditing `whitelist`. Overridable.
       whitelistDockerHosts = false;
 
-      # ── autoUpdate: true → false, whenever anything is pinned ──────────────
-      # Both of these drive a `git pull` into the plugin/extension directory.
+      # ── autoUpdate: true → false, when THAT thing is pinned ─────────────────
+      # Both of these drive a `git pull` into a plugin/extension directory.
       # This module installs those directories as READ-ONLY STORE PATHS, so an
       # update attempt fails. Worse, it would fail *after* the server decided it
       # needed to update, so the failure surfaces as a startup error rather than
       # as an inert UI button.
       #
-      # Only forced when there is something pinned, so a bare
+      # Each is gated on its OWN kind, and that matters:
+      # `extensions.autoUpdate` governs `public/scripts/extensions/third-party/`,
+      # which only this module's `extensions` populates. Server plugins live in
+      # a different directory and are governed by
+      # `enableServerPluginsAutoUpdate`, gated on `plugins` below.
+      #
+      # Gating extensions on `plugins != { }` as well silenced the UI
+      # extensions' auto-update for anyone who only ships a server plugin —
+      # the opposite directory would be the only one affected.
+      #
+      # Only forced when the relevant set is non-empty, so a bare
       # `services.sillytavern-nixos.enable` renders a config indistinguishable from a
       # hand-written one. modules/assertions.nix refuses the combination of an
       # explicit `true` here with a non-empty `plugins`/`extensions`.
       extensions =
         mergedConfig.extensions // {
-          autoUpdate = if mergedConfig.extensions.autoUpdate && (cfg.plugins != { } || cfg.extensions != { }) then false else mergedConfig.extensions.autoUpdate;
+          autoUpdate = if mergedConfig.extensions.autoUpdate && cfg.extensions != { } then false else mergedConfig.extensions.autoUpdate;
         };
 
       enableServerPluginsAutoUpdate =
@@ -440,32 +450,70 @@ let
   # `runCommand` that has to realise the file just to look at it, which makes the
   # regression test for the seedHandles bug slow and depends on the builder.
   seedSpecJson = {
-      # The ONLY data-root-level content this module ever writes, and it comes
-      # from exactly one option.
+      # Data-root-level content. This module writes exactly TWO destinations:
+      # `_css/user.css` and the four `_errors/*.html` pages. Both are populated
+      # exclusively from dedicated options with LITERAL keys.
       #
       # `dataRootFiles` was empty for a reason: listing `cfg.files.common` here as
       # well was a real bug that seeded every file twice and created stray
       # top-level directories SillyTavern never reads. The fix is NOT to
-      # repopulate this from `files.common` — it is to feed it from a single
-      # dedicated option with a LITERAL key, so the two maps are fed from
-      # disjoint sources and no user expression can put one path in both.
-      # assertions.nix re-checks that on every evaluation.
+      # repopulate this from `files.common` — it is to feed it only from options
+      # whose KEYS THIS FILE WRITES, so the two maps are fed from disjoint
+      # sources and no user expression can put one path in both. assertions.nix
+      # re-checks the resulting invariant on every evaluation.
       #
-      # `_css` is not in the seeder's reserved set: unlike `_storage`, `_cache`
-      # and `_errors`, it is configuration, and this is the only supported way
-      # to write it.
-      dataRootFiles = lib.optionalAttrs (cfg.customCss != null) {
-        "_css/user.css" = {
-          path = toString cfg.customCss;
-          # Nix-authoritative, ignoring `seedPolicy`. Nothing in the server
-          # writes this file — `userCssMiddleware` only reads it — so
-          # create-only would freeze the first version in place forever.
-          policy = "overwrite";
-          # Read-only to the service account and served to every visitor by
-          # `res.sendFile`, so NOT the 0600 every other seeded file gets.
-          mode = "0644";
-        };
-      };
+      # Neither `_css` nor `_errors` is in the seeder's reserved set: unlike
+      # `_storage`, `_cache` and `_webpack`, they are configuration, and these
+      # are the only supported ways to write them.
+      dataRootFiles =
+        (lib.optionalAttrs (cfg.customCss != null) {
+          "_css/user.css" = {
+            path = toString cfg.customCss;
+            # Nix-authoritative, ignoring `seedPolicy`. Nothing in the server ever
+            # UPDATES this file: content seeding copies `default/content/user.css`
+            # here on first start and then never overwrites it (`force: false`, and
+            # skipped entirely when the target exists), and nothing else writes it.
+            # Create-only would therefore freeze whatever landed first — usually
+            # the server's placeholder, or an older version of your own CSS — and
+            # editing this option would silently do nothing.
+            policy = "overwrite";
+            # Read-only to the service account and served to every visitor by
+            # `res.sendFile`, so NOT the 0600 every other seeded file gets.
+            mode = "0644";
+          };
+        })
+        // (
+          # The four error pages, keyed by their EXACT upstream filenames —
+          # `forbidden-by-whitelist.html` really does contain hyphens.
+          #
+          # `lib.filterAttrs` drops the unset ones, so a partial declaration
+          # leaves the rest to the server's own first-start content seeding from
+          # `default/content/index.json`, which copies with `force: false` and
+          # never overwrites.
+          #
+          # `overwrite` for the same reason as `customCss`: nothing ever UPDATES
+          # these files after that one-time copy, so create-only would freeze
+          # whatever landed first and make later edits to this option silently
+          # do nothing.
+          #
+          # `0644`, not the 0600 default, for the same reason as `user.css`:
+          # these are served to unauthenticated visitors by four different
+          # middleware/route sites.
+          lib.mapAttrs' (name: path:
+            lib.nameValuePair "_errors/${name}" {
+              inherit path;
+              policy = "overwrite";
+              mode = "0644";
+            }
+          ) (
+            lib.filterAttrs (_: path: path != null) {
+              "unauthorized.html" = cfg.errorPages.unauthorized;
+              "forbidden-by-whitelist.html" = cfg.errorPages.forbiddenByWhitelist;
+              "host-not-allowed.html" = cfg.errorPages.hostNotAllowed;
+              "url-not-found.html" = cfg.errorPages.urlNotFound;
+            }
+          )
+        );
       users = lib.genAttrs seedHandles (
         handle: {
           # `//` so a per-account leaf overrides the shared one without the
@@ -528,8 +576,13 @@ in
       # Derived from `stateDirectory`, which systemd turns into
       # /var/lib/<stateDirectory>. Declared `internal` over `readOnly` — see the
       # note on `dataRoot` in modules/options.nix.
+      #
+      # This used to sit next to a `dataRootPath` alias, declared so that
+      # `homeModules` could read the data root without reaching into a system
+      # option from a Home Manager module. Nothing ever read it: modules/home.nix
+      # reads `instance.config.port` and `instance.config.ssl.enabled`, and
+      # `dataRootPath` appeared nowhere else in the tree.
       dataRoot = lib.mkDefault "/var/lib/${cfg.stateDirectory}";
-      dataRootPath = lib.mkDefault "/var/lib/${cfg.stateDirectory}";
     };
 
     # The derived values every other module file reads. Assigned as ONE

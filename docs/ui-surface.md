@@ -393,7 +393,7 @@ quoted string (the exact bug this module exists to fix), and has no account
 seeding, JSON state, or secrets. Adopting it would mean discarding
 `modules/services.nix`, both seeders, and the entire JSON layer.
 
-### 4.2 `configYamlRoundTrip` is UNVERIFIED on this host
+### 4.2 `configYamlRoundTrip` — the check was itself broken; still unbuildable here
 
 > Do not read the green `nix flake check --no-build` as this check passing.
 > **It evaluates; it does not build on this machine.**
@@ -401,27 +401,84 @@ seeding, JSON state, or secrets. Adopting it would mean discarding
 - **Check:** `checks.<system>.configYamlRoundTrip`
 - **Host:** the development host for this repo (NixOS, nixpkgs
   `fe13242281a67641c0102cdb1087f0ebe586c7df`, Nix 2.34.8, `x86_64-linux`).
-- **Reason:** the check's fixed-output derivation runs `npm install yaml@2.8.3`
-  from `registry.npmjs.org`. This host reaches the npm registry through a
-  **TLS-intercepting proxy**, and Node rejects the substituted certificate:
 
-  ```
-  npm error code UNABLE_TO_GET_ISSUER_CERT_LOCALLY
-  npm error request to https://registry.npmjs.org/yaml failed,
-            reason: unable to get local issuer certificate
-  ```
+Two separate things were wrong with it. The first was **not** environmental and
+would have failed on every host, unproxied included.
 
-  A `caCertFile` / `NODE_EXTRA_CA_CERTS` workaround was added to the derivation
-  and did not help; the interception is not trusted by this Node.
+#### 4.2.1 The check could never have passed — `NODE_PATH` does not apply to ESM
 
-**What IS verified:** the same round-trip was performed directly against the
-real `yaml` package during development and every modelled key matched upstream.
-**What is NOT verified:** that the check builds *as written* in `lib/tests.nix`.
-If you run CI on an unproxied host, run it once before trusting it — the failure
-mode if the check is broken is the same shape as the TLS failure, so a green
-build there is the only real evidence.
+`lib/tests.nix` made the `yaml` parser resolvable with:
 
-The other six checks build and pass on this host.
+```bash
+export NODE_PATH=${yamlPkg}
+```
+
+`NODE_PATH` is a **CommonJS**-only mechanism. `canonicalise-config.mjs` is an ES
+module (`import YAML from "yaml"`, line 29), and Node's ESM resolver ignores
+`NODE_PATH` outright. The check therefore died with:
+
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'yaml'
+  imported from …/canonicalise.mjs
+```
+
+Reproduced directly. This is why the check had never been observed green
+anywhere, and why the warning below about "the failure mode if the check is
+broken is the same shape as the TLS failure" was the right thing to worry about.
+
+**Fixed:** a `node_modules` symlink beside the importing file, which is the
+mechanism ESM resolution actually uses — `ln -s ${yamlPkg} ./node_modules`.
+
+#### 4.2.2 It would also have failed on a deliberate, documented divergence
+
+`protocol.ipv4` / `.ipv6` are rendered as the **strings** `"true"` / `"false"`
+because upstream accepts a string-or-bool hybrid there and `"auto"` has no
+boolean equivalent, so the option type is an enum of strings. Upstream's file
+has booleans. The comparison is byte-exact, so that is a diff.
+
+Functionally identical — `src/command-line.js:307-308` reads both through
+`stringToBool`. It is now recorded in the check's `overrides.json`, which is
+what that mechanism exists for, so the round trip stays exact everywhere else.
+
+#### 4.2.3 Still blocked here: npm is behind a TLS-intercepting proxy
+
+The check's fixed-output derivation runs `npm install yaml@2.8.3`. This host
+reaches the registry through a **TLS-intercepting proxy** and Node rejects the
+substituted certificate:
+
+```
+npm error code UNABLE_TO_GET_ISSUER_CERT_LOCALLY
+npm error request to https://registry.npmjs.org/yaml failed,
+          reason: unable to get local issuer certificate
+```
+
+A `caCertFile` / `NODE_EXTRA_CA_CERTS` workaround was added and did not help;
+the interception is not trusted by this Node.
+
+**Verified another way.** The comparison was run by hand against the `yaml@2.8.3`
+already present in the built `sillytavern` package — the same version the lockfile
+pins, the same parser — and the result is now a byte-identical match against
+`default/config.yaml`:
+
+```
+diff -u upstream.json rendered.json  ->  IDENTICAL
+```
+
+That run is what found the `thumbnails.dimensions` defect in §4.2.4: the first
+time it was performed, six keys differed.
+
+#### 4.2.4 What that manual run found
+
+`thumbnails.dimensions.<kind>` is a two-element **list** upstream
+(`'bg': [160, 90]`), and the server destructures it. The module modelled it as a
+`{ width, height; }` submodule, so the rendered config was rejected by the
+running server as incomplete and thumbnail generation failed on a DEFAULT
+configuration. Fixed in `modules/options.nix`; `configYamlRoundTrip` now covers
+it, and `pluginsAndExtensionsAreUsable` exists for the same reason — to cover a
+defect no existing check could reach.
+
+The other ten checks build and pass on this host; `configYamlRoundTrip` is the
+only one that does not, for the environmental reason above.
 
 ---
 
@@ -514,21 +571,34 @@ services.sillytavern-nixos.customCss = ./ui-overrides.css;
 
 **Nix-authoritative: overwritten on every activation, ignoring `seedPolicy`.**
 That is deliberate and opposite to every other file in the module, because
-create-only would protect nothing:
+create-only would protect nothing: nothing ever *updates* this file.
 
-- Nothing in the server *writes* this file. `_css` is the global content-manager
-  target for `CONTENT_TYPES.STYLESHEET`, but the only routes that write there are
-  `importURL` and `importUUID`, and `grep -rn contentmanager public/` finds
-  nothing — there is no UI for it.
-- The editor people actually use is `power_user.custom_css`, which is a
-  different file in `settings.json` and is seeded create-only like everything
-  else.
+> **Correction.** An earlier draft of this section said "nothing in the server
+> *writes* this file". That was wrong, and the error was worth correcting
+> precisely because it argued for the right behaviour for the wrong reason.
+> The server DOES write it — `seedContent` (`src/endpoints/content-manager.js`)
+> copies `default/content/user.css` to `DATA_ROOT/_css/user.css` on first
+> start, and a live run shows it:
+>
+> ```
+> Content file user.css copied to /var/lib/sillytavern/_css
+> ```
+>
+> with `force: false`, and the copy skipped outright when the target already
+> exists. So the file is written once and never changed again. `_css` is also
+> the global content-manager target for `CONTENT_TYPES.STYLESHEET`, but the only
+> routes that write there are `importURL` and `importUUID`, and
+> `grep -rn contentmanager public/` finds nothing — there is no UI for it.
 
-Under the default `"missing"` policy the file would be written once and never
-updated, so editing the option would silently do nothing — the exact failure
-this option exists to fix. Verified live: a second activation logs `restored`
-(not `skipped`) and a **running** server serves the new content with no restart,
+Under the default `"missing"` policy the file would therefore be written once —
+by the server, or by an earlier activation of this option — and never updated,
+so editing the option would silently do nothing: the exact failure this option
+exists to fix. Verified live: a second activation logs `restored` (not
+`skipped`) and a **running** server serves the new content with no restart,
 because the middleware reads from disk on every request.
+
+The editor people actually use is `power_user.custom_css`, a different file in
+`settings.json`, seeded create-only like everything else.
 
 **Mode `0644`, not the seeder's `0600`.** `res.sendFile` hands this to every
 visitor; owner-only would be wrong for it even though it is right for
@@ -581,7 +651,7 @@ what it would take.
 |---|---|---|---|
 | 1 | **`home-manager` flake input.** `nix-tests/home-eval.sh` pins revision `640725978` and fetches it over the network, because adding an input is a policy decision. | owner | **pending decision.** If added, swap the fetch for the flake input and delete the fetch. |
 | 2 | **Rename to `-nixos` (option 1 in §4.1.5).** Unit, account and `StateDirectory` all become `sillytavern-nixos`. Breaking: loses the `sillytavern.service` name and `/var/lib/sillytavern`. | owner | **not scheduled.** Ship the assertion first — done — then the rename in a major. |
-| 3 | **`configYamlRoundTrip` unverified on this host.** | — | **blocked environmentally.** npm is behind a TLS-intercepting proxy; see §4.2. Needs one green run on an unproxied host (CI). |
+| 3 | **`configYamlRoundTrip` cannot build on this host.** The check itself had a host-independent defect, now fixed (§4.2.1); what remains is npm behind a TLS-intercepting proxy. | — | **blocked environmentally.** Its comparison was run by hand against the package's own `yaml` and is a byte-identical match (§4.2.3). Needs one green run on an unproxied host (CI). |
 | 4 | **`noCrossModuleReads` is a grep.** | — | **permanent limitation**, not a bug. Cannot see dynamic access through a variable, concatenated paths, or anything outside `modules/` and `lib/`. |
 | 5 | **Upstream locale issue.** Draft written in §5.1. | owner | **drafted, NOT filed.** |
 | 6 | **`modules/home.nix` has no check in `nix flake check`.** | — | Covered by `nix-tests/home-eval.sh` instead, which needs network. Moving it in depends on item 1. |

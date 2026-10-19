@@ -21,7 +21,9 @@ instead of from clicking. It is deliberately narrow:
     `--policy overwrite`. The server rewrites that file constantly and adds keys
     this script has never heard of; replacing it wholesale would delete them.
   * Runtime state is never touched: `stats.json`, `backups/`, `_storage/`,
-    `_webpack/`, `_errors/` and `config.yaml` are refused outright.
+    `_webpack/` and `config.yaml` are refused outright. `_errors/` is refused
+    too, except for the four filenames upstream actually serves — see
+    `ALLOWED_ERROR_PAGES`.
   * Paths are confined to the data root. A relative path containing `..`, or an
     absolute path, is an error rather than a write outside the root.
 
@@ -72,7 +74,33 @@ RESERVED_BASENAMES = frozenset({"stats.json", "config.yaml", "secrets.json"})
 # `_cache` is the transformers.js model cache (`DATA_ROOT/_cache`, see
 # src/transformers.js) — hundreds of MiB of downloaded ONNX weights, pure
 # runtime state, and never something a spec should be able to declare.
-RESERVED_TOP_LEVEL = frozenset({"_storage", "_webpack", "_errors", "_sc", "_cache", "backups"})
+#
+# `_errors` used to be reserved outright, which made branded error pages
+# unreachable from Nix: upstream serves four HTML files from `DATA_ROOT/_errors`
+# on exactly the paths an operator most wants to rebrand (failed login, blocked
+# IP, rejected Host, 404), and there was no way to override any of them. They
+# are configuration, not runtime state — the content manager copies them once
+# from `default/content/index.json` and never overwrites — so they are handled
+# by the narrow allowlist below rather than by a blanket refusal.
+RESERVED_TOP_LEVEL = frozenset({"_storage", "_webpack", "_sc", "_cache", "backups"})
+
+# The only files allowed under `_errors/`. Exactly upstream's four, hardcoded at
+# four separate call sites; anything else in that directory is never read, so
+# allowing it would only create a file that looks meaningful and is not.
+#
+#   forbidden-by-whitelist.html  src/middleware/whitelist.js:59
+#   host-not-allowed.html        src/middleware/hostWhitelist.js:14
+#   unauthorized.html            src/endpoints/users-public.js
+#   url-not-found.html           src/server-main.js:456
+ALLOWED_ERROR_PAGES = frozenset(
+    {
+        "forbidden-by-whitelist.html",
+        "host-not-allowed.html",
+        "unauthorized.html",
+        "url-not-found.html",
+    }
+)
+ERROR_DIR = "_errors"
 
 # settings.json holds whatever the UI put there, including API keys typed into
 # the connection panel. Seeded files are owner-only.
@@ -119,6 +147,15 @@ def safe_join(root: str, rel: str) -> str:
         raise SeedError(f"path escapes the data root: {rel!r}")
     if parts and parts[0] in RESERVED_TOP_LEVEL:
         raise SeedError(f"refusing to seed reserved server state: {rel!r}")
+    # `_errors/` is open, but only to the four filenames upstream actually reads,
+    # and only at the top level of it: no `_errors/subdir/x.html`, which would
+    # pass the basename check and still be a file nothing ever serves.
+    if parts and parts[0] == ERROR_DIR:
+        if len(parts) != 2 or parts[1] not in ALLOWED_ERROR_PAGES:
+            raise SeedError(
+                f"refusing to seed {ERROR_DIR!r} path: {rel!r}; "
+                f"only {', '.join(sorted(ALLOWED_ERROR_PAGES))} are read by the server"
+            )
     if os.path.basename(parts[-1]) in RESERVED_BASENAMES:
         raise SeedError(f"refusing to seed reserved server state: {rel!r}")
 
@@ -203,8 +240,10 @@ def policy_for(entry: dict, default: str) -> str:
 
     This exists for exactly one caller: `_css/user.css`, which must be
     overwritten on every activation regardless of `seedPolicy` because nothing
-    in the server ever writes it, so create-only would mean the file is written
-    once and then never updated again.
+    in the server ever UPDATES it — content seeding copies
+    `default/content/user.css` into place on first start and then never
+    overwrites it — so create-only would mean the file is written once and then
+    never changed again.
     """
     raw = entry.get("policy")
     if raw is None:

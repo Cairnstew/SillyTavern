@@ -31,14 +31,26 @@
 # directory AND exempts it from `ProtectSystem=strict`. It is the only writable
 # path the unit gets, which is why `cli.dataRoot` is asserted to match it.
 #
-# ── 3. The access log has to move ─────────────────────────────────────────────
+# ── 3. The access log needs no redirection at all ────────────────────────────
 #
-# `logging.enableAccessLog` opens `access.log` RELATIVE to the server directory,
-# which is the read-only store. Left alone, every request logs an EROFS error.
-# The unit therefore sets the server's working directory to the data root's
-# parent for logging purposes — no: it cannot, because the server also resolves
-# `default/content` and `certs/` from that directory. Instead the unit turns the
-# access log off by default and says so; see `accessLogMode` below.
+# `logging.enableAccessLog` opens `access.log` in the DATA ROOT, not in the
+# server directory — `src/middleware/accessLogWriter.js:10`:
+#
+#   export const getAccessLogPath = () => path.join(globalThis.DATA_ROOT, 'access.log');
+#
+# which is exactly where `StateDirectory` puts it, and systemd exempts that
+# directory from `ProtectSystem=strict`. So the option works as-is under this
+# unit and the log lands in /var/lib/sillytavern/access.log.
+#
+# This note previously said the opposite, on the belief that the path was
+# resolved against the read-only package directory, and carried an
+# `accessLogMode` binding to "fix" it. Both were wrong and the binding was never
+# used by anything: it was computed and dropped. There was also a matching claim
+# in the `logging.enableAccessLog` option description.
+#
+# Recorded because the wrong belief is easy to re-derive — `server.js` does
+# `process.chdir(serverDirectory)` at startup, and several other paths in this
+# module are genuinely relative to it. This one is not.
 #
 # ── 4. Secrets are assembled at start, from paths, into a 0700 directory ─────
 #
@@ -115,10 +127,50 @@ let
   # found a list". NixOS renders the set into `Environment=` itself, quoting each
   # value — so doing it here would double-quote.
 
-  # What the server opens RELATIVE to its own directory: `access.log`. The
-  # package directory is read-only, so this has to be off unless the caller has
-  # arranged otherwise.
-  accessLogMode = if cfg.config.logging.enableAccessLog then "warn" else "off";
+  # ── Resource caps ───────────────────────────────────────────────────────────
+  #
+  # `hardware` is a submodule whose members are camelCase, and the unit's
+  # directives are not. NixOS renders `serviceConfig` attribute names VERBATIM
+  # into the unit file and systemd's directives are case-sensitive, so the two
+  # spellings have to be translated. Verified by evaluating a unit with both
+  # spellings set:
+  #
+  #   serviceConfig = { memoryMax = "4G"; MemoryMax = "8G"; ioWeight = "500"; }
+  #     -> MemoryMax=8G
+  #        memoryMax=4G          <- verbatim, unknown directive, IGNORED
+  #        ioWeight=500          <- verbatim, unknown directive, IGNORED
+  #
+  # So a plain `// cfg.hardware` would produce a unit that looks configured and
+  # caps nothing — silent, and the exact failure mode this project documents
+  # everywhere else. This map is the whole reason.
+  #
+  # The two lists must stay in sync: this one and the `hardware` submodule in
+  # modules/options.nix. Adding a cap to the option without adding it here is a
+  # loud failure, not a silent one — `systemdHardwareName.${name}` raises
+  # "attribute '<name>' missing" at evaluation, naming the option that has no
+  # mapping.
+  systemdHardwareName = {
+    memoryMax = "MemoryMax";
+    memoryHigh = "MemoryHigh";
+    memorySwapMax = "MemorySwapMax";
+    cpuQuota = "CPUQuota";
+    nice = "Nice";
+    ioWeight = "IOWeight";
+  };
+
+  # Both transformations in one: drop the unset caps, then rename what is left.
+  #
+  # `lib.filterAttrs` rather than a raw `cfg.hardware`: every member defaults to
+  # null, and injecting `MemoryMax = null` into serviceConfig breaks the
+  # `attrsOf unitOption` merge with "attribute 'optionalValue' missing" raised
+  # from inside lib/types.nix.
+  #
+  # `lib.mapAttrs'` hands each result to `listToAttrs`, which wants
+  # `{ name, value; }` pairs — hence `lib.nameValuePair`.
+  hardwareConfig =
+    lib.filterAttrs (_: value: value != null) (
+      lib.mapAttrs' (name: value: lib.nameValuePair systemdHardwareName.${name} value) cfg.hardware
+    );
 
   # Declared accounts that have a password file, as `--user` argv.
   #
@@ -287,7 +339,9 @@ in
         Group = cfg.group;
         WorkingDirectory = packaged;
 
-        # See header note 3.
+        # Console output goes to the journal. The FILE access log is separate and
+        # needs nothing here: it goes to <dataRoot>/access.log, which
+        # `StateDirectory` already makes writable. See header note 3.
         StandardOutput = "journal";
         StandardError = "journal";
 
@@ -340,15 +394,7 @@ in
         # `NODE_OPTIONS` is deliberately NOT set: heap sizing is left to
         # systemd's memory caps rather than to a flag that has to be kept in sync
         # with `hardware.memoryMax`.
-      }
-      # The hardware caps ARE `serviceConfig` keys, so they merge INTO
-      # serviceConfig rather than sitting beside it.
-      # Only the caps that are actually set. `cfg.hardware`'s members default
-      # to null, and injecting `memoryMax = null` into serviceConfig breaks the
-      # `attrsOf unitOption` merge with "attribute 'optionalValue' missing"
-      # raised from inside lib/types.nix.
-      # lib.filterAttrs (_: v: v != null) cfg.hardware
-      ;
+      } // hardwareConfig;
 
       # `environment`, not `serviceConfig.Environment`.
       # NixOS' systemd module declares the unit-level `environment` as an

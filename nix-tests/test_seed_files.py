@@ -66,6 +66,10 @@ class PathSafetyTests(unittest.TestCase):
         with self.assertRaises(seeder.SeedError):
             seeder.safe_join(self.root, rel)
 
+    def _assertAccepted(self, rel):
+        """`safe_join` returns a path rather than raising; a return IS acceptance."""
+        self.assertTrue(seeder.safe_join(self.root, rel))
+
     def test_accepts_a_ordinary_relative_path(self):
         self.assertEqual(
             seeder.safe_join(self.root, "sysprompt/Roleplay.json"),
@@ -93,9 +97,55 @@ class PathSafetyTests(unittest.TestCase):
                 self._assertRefused(rel)
 
     def test_refuses_reserved_directories(self):
-        for rel in ("_storage/x", "_webpack/y", "_errors/z", "backups/settings.json"):
+        for rel in ("_storage/x", "_webpack/y", "backups/settings.json"):
             with self.subTest(rel=rel):
                 self._assertRefused(rel)
+
+    # ── `_errors/` ───────────────────────────────────────────────────────────
+    #
+    # `_errors` used to be in RESERVED_TOP_LEVEL, which made branded error
+    # pages unreachable from Nix: upstream serves four HTML files from
+    # `DATA_ROOT/_errors` on exactly the paths an operator most wants to rebrand,
+    # and the module could not override any of them. It is now open — but only to
+    # the four filenames upstream actually reads, and only at the top level.
+    #
+    # These four names are hardcoded at four separate call sites in src/; a
+    # change to any of them has to be reflected here or branding silently stops
+    # applying, which is exactly what the refusal is here to prevent.
+
+    def test_accepts_the_four_upstream_error_pages(self):
+        for name in (
+            "unauthorized.html",
+            "forbidden-by-whitelist.html",
+            "host-not-allowed.html",
+            "url-not-found.html",
+        ):
+            with self.subTest(name=name):
+                self._assertAccepted(f"_errors/{name}")
+
+    def test_refuses_an_unknown_error_page(self):
+        # Not read by the server anywhere: seeding it would create a file that
+        # looks meaningful and is never served.
+        for rel in ("_errors/evil.html", "_errors/z", "_errors/", "_errors/Untitled.txt"):
+            with self.subTest(rel=rel):
+                self._assertRefused(rel)
+
+    def test_refuses_a_nested_error_page(self):
+        # The basename alone would pass the allowlist; the depth check is what
+        # stops `_errors/sub/x.html` from being accepted.
+        self._assertRefused("_errors/sub/unauthorized.html")
+
+    def test_error_page_allowlist_matches_upstream(self):
+        # Guards against the seeder drifting from src/. If upstream adds a fifth
+        # page this fails and the error names the missing ones.
+        expected = {
+            "forbidden-by-whitelist.html",
+            "host-not-allowed.html",
+            "unauthorized.html",
+            "url-not-found.html",
+        }
+        self.assertEqual(seeder.ALLOWED_ERROR_PAGES, expected)
+        self.assertNotIn("_errors", seeder.RESERVED_TOP_LEVEL)
 
     def test_traversal_that_normalises_back_inside_is_still_refused(self):
         # `a/../b` stays inside the root, but the `..` is still a caller mistake

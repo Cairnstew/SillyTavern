@@ -61,22 +61,28 @@ let
 
   # ── Shared submodules ───────────────────────────────────────────────────────
 
-  # `[ width, height ]`, as `thumbnails.dimensions.*` is shaped upstream: a
-  # mapping of kind -> pair, not a list of pairs.
-  dimensionPair = types.submodule {
-    options = {
-      width = mkOption {
-        type = types.ints.positive;
-        default = 0;
-        description = "Pixel width.";
-      };
-      height = mkOption {
-        type = types.ints.positive;
-        default = 0;
-        description = "Pixel height.";
-      };
-    };
-  };
+  # `thumbnails.dimensions.<kind>` is `[ width, height ]` — a TWO-ELEMENT LIST,
+  # not an object.
+  #
+  # It was previously a `{ width, height; }` submodule, on the reading that
+  # upstream's comment ("Maximum thumbnail dimensions per type [width, height]")
+  # describes the shape of the MAPPING rather than of each value. It does not:
+  # upstream ships `dimensions: { 'bg': [160, 90], 'avatar': [96, 144], … }`, and
+  # the server reads each value as a list —
+  #
+  #   src/endpoints/image-metadata.js:41-58   getConfigValue('thumbnails.dimensions.bg', [160, 90])
+  #   src/endpoints/thumbnails.js:215         const [configWidth, configHeight] = dimensions[type];
+  #
+  # so the object form renders a config the server rejects as incomplete. Verified
+  # against a running 1.19.0: it reports `thumbnails.dimensions.bg.0` and `.1` as
+  # missing keys, `getThumbnailResolution()` returns 0 instead of 14400, and the
+  # destructuring throws `TypeError: object is not iterable` — thumbnail
+  # generation fails for every image, on a DEFAULT configuration.
+  #
+  # `types.listOf` keeps the pair typed (two positive ints) and renders as the
+  # `[160, 90]` flow sequence upstream uses. Note lib/default.nix's renderer
+  # already documented this exact case.
+  dimensionPair = types.listOf types.ints.positive;
 
   # A `requestOverrides` entry. Upstream documents the shape but ships `[]`, so
   # this submodule is transcribed from the comment block in config.yaml rather
@@ -944,10 +950,15 @@ in
           type = types.bool;
           default = true;
           description = ''
-            Write an access log. Note this is a FILE (`access.log`, in the
-            server directory by default) as well as console output — under a Nix
-            build the server directory is read-only, so the module redirects it
-            into the state directory. See modules/config.nix.
+            Write an access log.
+
+            The log is a FILE at `<dataRoot>/access.log`
+            (`src/middleware/accessLogWriter.js:10`), not in the server
+            directory — so under this module it needs no redirection and lands
+            in the state directory, which `StateDirectory` keeps writable.
+
+            Each newly-seen client IP is also logged to the journal at info
+            level; `logging.minLogLevel` controls that.
           '';
         };
         minLogLevel = mkOption {
@@ -1068,27 +1079,39 @@ in
         dimensions = {
           bg = mkOption {
             type = dimensionPair;
-            default = {
-              width = 160;
-              height = 90;
-            };
-            description = "Thumbnail size for background images.";
+            default = [
+              160
+              90
+            ];
+            example = literalExpression "[ 192 108 ]";
+            description = ''
+              Thumbnail size for background images, as `[ width height ]`.
+
+              Must be a two-element list: the server destructures it. See the note
+              on `dimensionPair` above.
+            '';
           };
           avatar = mkOption {
             type = dimensionPair;
-            default = {
-              width = 96;
-              height = 144;
-            };
-            description = "Thumbnail size for character avatars.";
+            default = [
+              96
+              144
+            ];
+            description = ''
+              Thumbnail size for character avatars, as `[ width height ]`. The
+              server destructures this list, so both elements are required.
+            '';
           };
           persona = mkOption {
             type = dimensionPair;
-            default = {
-              width = 96;
-              height = 144;
-            };
-            description = "Thumbnail size for user personas.";
+            default = [
+              96
+              144
+            ];
+            description = ''
+              Thumbnail size for user personas, as `[ width height ]`. The
+              server destructures this list, so both elements are required.
+            '';
           };
         };
       };
@@ -1961,29 +1984,103 @@ in
         OVERWRITTEN on every activation, and `seedPolicy` does not apply to it.
         That is deliberate and it is the opposite of how every other file in
         this module behaves. The reasoning is that create-only semantics would
-        protect nothing here:
+        protect nothing here: nothing ever UPDATES this file.
 
-          * Nothing in the server writes this file. `_css` is the global target
-            for `CONTENT_TYPES.STYLESHEET` (`src/endpoints/content-manager.js`),
-            but the only routes that write there are `importURL` and
-            `importUUID`, and there is no UI for either — `grep -rn
-            contentmanager public/` finds nothing.
-          * The in-browser editor people actually use is
-            `settings.common.power_user.custom_css`, which lands in
-            `settings.json` and is seeded create-only like everything else.
+        The server does write it, but exactly once. Content seeding copies
+        `default/content/user.css` to `<dataRoot>/_css/user.css` on first start
+        (`seedContent` in `src/endpoints/content-manager.js` — `force: false`,
+        and the copy is skipped outright when the target already exists), and
+        nothing ever overwrites it afterwards. `_css` is also the global
+        content-manager target for `CONTENT_TYPES.STYLESHEET`, but the only
+        routes that write there are `importURL` and `importUUID`, and there is no
+        UI for either — `grep -rn contentmanager public/` finds nothing.
 
-        So under `"missing"` the file would simply be written once and never
-        updated again, and editing this option would silently do nothing — the
-        exact failure mode this option exists to fix.
+        So under `"missing"` the file would be written once by the server and
+        then never change again, and editing this option would silently do
+        nothing — the exact failure mode this option exists to fix.
+
+        Note this is a different file from `settings.common.power_user.custom_css`,
+        the in-browser editor's textarea, which lands in `settings.json` and is
+        seeded create-only like everything else.
 
         Leaving this `null` means the module NEVER TOUCHES the file: an existing
         `_css/user.css` is left completely alone, whether hand-written, imported
-        through the content manager, or migrated from an older install by
-        `src/users.js` (which moves a legacy `public/css/user.css` into the data
-        root when the target does not already exist). Removing this option from
-        your configuration does NOT delete a previously-seeded file — it stops
-        managing it and leaves it in place.
+        through the content manager, or seeded by the server itself on first
+        start. Removing this option from your configuration does NOT delete a
+        previously-seeded file — it stops managing it and leaves it in place.
       '';
+    };
+
+    # ── Branded error pages ──────────────────────────────────────────────────
+    #
+    # The mirror of `customCss`, and it exists for the same reason: upstream
+    # ships four HTML pages that it serves to UNAUTHENTICATED visitors on
+    # exactly the paths an operator most wants branded — a failed SSO login, a
+    # rejected host header, a blocked IP, a 404. They were unreachable from Nix
+    # before this option: `st_seed_files.py` refused `_errors/` outright
+    # (RESERVED_TOP_LEVEL) and `dataRootFiles` was fed from `customCss` alone.
+    #
+    # The four names are the ones upstream hardcodes, at four separate sites:
+    #   forbidden-by-whitelist.html  src/middleware/whitelist.js:59
+    #   host-not-allowed.html        src/middleware/hostWhitelist.js:14
+    #   unauthorized.html           src/endpoints/users-public.js
+    #   url-not-found.html           src/server-main.js:456
+    # and are seeded from `default/content/index.json` on first start. Declaring
+    # one here overrides that copy.
+    #
+    # LITERAL KEYS, not an `attrsOf`, on purpose: `dataRootFiles` must only ever
+    # be populated from fixed paths, so no user expression can put an arbitrary
+    # path in it. `assertions.nix` re-checks that on every evaluation. This is
+    # the same invariant that stopped `files.common` from being folded in.
+    errorPages = {
+      unauthorized = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        example = literalExpression "./pages/unauthorized.html";
+        description = ''
+          Installed as `<dataRoot>/_errors/unauthorized.html`. Served when a
+          login attempt fails or the session is missing.
+
+          Same semantics as `customCss`: Nix-authoritative, overwritten on every
+          activation, `seedPolicy` does not apply. Nothing ever UPDATES these
+          files after the content-manager's first-start copy.
+        '';
+      };
+
+      forbiddenByWhitelist = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        example = literalExpression "./pages/blocked.html";
+        description = ''
+          Installed as `<dataRoot>/_errors/forbidden-by-whitelist.html`. Served
+          to a client whose address is not in `config.whitelist`, by the
+          whitelist middleware before any authentication happens.
+
+          Note the filename contains a hyphen and the option name does not —
+          upstream's name is `forbidden-by-whitelist`, not
+          `forbiddenByWhitelist`.
+        '';
+      };
+
+      hostNotAllowed = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = ''
+          Installed as `<dataRoot>/_errors/host-not-allowed.html`. Served when
+          the request's `Host` header fails `config.hostWhitelist` — the common
+          case being a reverse proxy forwarding a hostname you did not allow.
+        '';
+      };
+
+      urlNotFound = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        description = ''
+          Installed as `<dataRoot>/_errors/url-not-found.html`. Served for any
+          unmatched route, so this one is what a visitor sees for a typo'd URL
+          or a stale bookmark.
+        '';
+      };
     };
 
     # ── Provider API keys ─────────────────────────────────────────────────────
@@ -2297,19 +2394,6 @@ in
         example = literalExpression "\"\${config.networking.x509.certificates.myserver}.key\"";
         description = "Private key file. Same caveats as `ssl.certFile`.";
       };
-    };
-
-    # ── Reverse-proxy helpers exposed as config ───────────────────────────────
-
-    dataRootPath = mkOption {
-      type = types.str;
-      internal = true;
-      default = "/var/lib/sillytavern";
-      defaultText = "/var/lib/${config.services.sillytavern-nixos.stateDirectory}";
-      description = ''
-        Alias of `dataRoot`, kept so `homeModules` can read it without reaching
-        into a system option from a Home Manager module.
-      '';
     };
   };
 }

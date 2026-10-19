@@ -349,8 +349,19 @@ in
     # `git pull` into one of those fails with EROFS. The failure surfaces late
     # — after the server has already decided an update is due — so it appears as
     # a startup error rather than as an inert button.
+    #
+    # BOTH assertions below read `effectiveConfig`, NOT `cfg.config`.
+    #
+    # modules/config.nix already forces these to false whenever the
+    # corresponding store paths exist, so the OPTION still holds its upstream
+    # default of `true` in exactly the case the assertion is about. Reading the
+    # option made the assertion fire on the very configuration it says the
+    # module handles — its own message ended "The module turns this off for you
+    # when extensions are non-empty" while demanding the user set it themselves.
+    # Declaring one extension therefore failed the build with no way out short
+    # of also setting an option the module had already overridden.
     {
-      assertion = cfg.plugins == { } || !cfg.config.enableServerPluginsAutoUpdate;
+      assertion = cfg.plugins == { } || !effectiveConfig.enableServerPluginsAutoUpdate;
       message = ''
         services.sillytavern-nixos: plugins are declared but
         config.enableServerPluginsAutoUpdate = true.
@@ -366,7 +377,8 @@ in
     }
 
     {
-      assertion = cfg.extensions == { } || !cfg.config.extensions.autoUpdate;
+      # `effectiveConfig`, for the reason in the header note above.
+      assertion = cfg.extensions == { } || !effectiveConfig.extensions.autoUpdate;
       message = ''
         services.sillytavern-nixos: extensions are declared but
         config.extensions.autoUpdate = true.
@@ -375,7 +387,8 @@ in
         automatic update fails with EROFS. Update them by changing the `rev` in
         services.sillytavern-nixos.extensions and rebuilding.
 
-        The module turns this off for you when extensions are non-empty.
+        The module turns this off for you when extensions are non-empty; this
+        assertion only fires if you set it back to true.
       '';
     }
 
@@ -725,7 +738,29 @@ in
 
     # ── git rev must be pinned ────────────────────────────────────────────────
     {
-      assertion = builtins.all (handle: spec: lib.hasInfix "/" spec.rev || builtins.match "^[0-9a-f]{40}$" spec.rev != null) (
+      # `lib.all`, NOT `builtins.all`, and a ONE-argument predicate.
+      #
+      # Two mistakes used to be stacked here and neither was visible while this
+      # module had no plugins:
+      #
+      #   * `builtins.all` is a strict two-argument builtin, so it calls
+      #     `pred elem` with ONE argument. The curried `(handle: spec: …)`
+      #     returned a *function* where a boolean was expected. Declaring any
+      #     plugin or extension therefore made the whole SYSTEM fail to
+      #     evaluate — `lib.asserts.checkAssertWarn` (what
+      #     nixos/modules/system/activation/top-level.nix runs) forces every
+      #     `assertion`, and it threw:
+      #
+      #       error: expected a Boolean but found a function: … assertions.nix:728
+      #
+      #   * With an EMPTY list `builtins.all` returns true without ever calling
+      #     the predicate, so every check in lib/tests.nix passed. The bug was
+      #     only reachable by doing the one thing the module exists for.
+      #
+      # `lib.all` auto-applies to `pred elem`, so a single-argument predicate is
+      # the correct shape; the records in the list are `{ rev = …; }`, which is
+      # all the predicate ever needed, hence no `handle`.
+      assertion = lib.all (spec: lib.hasInfix "/" spec.rev || builtins.match "^[0-9a-f]{40}$" spec.rev != null) (
         lib.attrValues (lib.mapAttrs (_: s: { rev = s.rev; }) (cfg.plugins // cfg.extensions))
       );
       message = ''
