@@ -328,7 +328,32 @@ stdenvNoCC.mkDerivation {
   dontUnpack = true;
 
   # The tree that gets installed. `lib.cleanSourceWith` has already dropped
-  # `.git`, `node_modules`, `dist` and `result`.
+  # `.git`, `node_modules`, `dist` and `result` — but ONLY for the flake's
+  # own `source`, which is a git snapshot.
+  #
+  # `${source}` is a path literal here, and a path literal is resolved to
+  # whatever the directory contains AT BUILD TIME. When the package is built
+  # from a `path:` flake (`nix build -f`, or `builtins.getFlake "path:…"`)
+  # rather than a git one, that is the working directory as it is on disk —
+  # including UNTRACKED files the filter never saw.
+  #
+  # The two that matter:
+  #
+  #   result/         a `nix build --out-link result` symlink. Copied in, it
+  #                   points at the PREVIOUS build's store path, which is not
+  #                   in this build's closure — so the fixup phase rejects the
+  #                   whole package:
+  #
+  #                     ERROR: noBrokenSymlinks: the symlink …/result points
+  #                     to a missing target: /nix/store/…-sillytavern-1.19.0
+  #
+  #   */node_modules/ a nested dependency tree (e.g. `.opencode/node_modules`,
+  #                   63 MiB) that the top-level-only filter does not match,
+  #                   because the filter compares the BASENAME.
+  #
+  # So the cleanup below is not redundant with the filter — it is the
+  # belt to the filter's braces, and it is what makes the package buildable
+  # from a working tree at all.
   installPhase = ''
     runHook preInstall
 
@@ -336,6 +361,11 @@ stdenvNoCC.mkDerivation {
     cp -r --no-preserve=mode,ownership,timestamps ${source}/. "$out/"
 
     rm -rf "$out/.git" "$out/node_modules" "$out/dist"
+    # `result` is a SYMLINK to a store path, so `rm -rf` would follow it and
+    # delete the target's contents. Remove the link itself.
+    [ -L "$out/result" ] && rm -f "$out/result" || rm -rf "$out/result"
+    # Every nested node_modules tree, at any depth.
+    find "$out" -type d -name node_modules -prune -exec rm -rf {} +
     chmod -R u+w "$out"
 
     # node_modules from the fixed-output derivation. Copied rather than

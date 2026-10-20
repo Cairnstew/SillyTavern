@@ -16,7 +16,7 @@
 #
 # Consumed as a flake input:
 #
-#   inputs.sillytavern.url = "github:Cairnstew/nixos-sillytavern";
+#   inputs.sillytavern.url = "github:Cairnstew/SillyTavern";
 #   nixpkgs.overlays = [ inputs.sillytavern.overlays.default ];
 #   imports = [ inputs.sillytavern.nixosModules.sillytavern ];
 #
@@ -70,11 +70,12 @@
       #
       # The filter then drops `node_modules`, `dist` and `result`; see
       # pkgs/sillytavern/filter.nix for why each is load-bearing.
-      source = lib.cleanSourceWith {
-        src = ./.;
-        name = "sillytavern-source";
-        filter = import ./pkgs/sillytavern/filter.nix { inherit lib; };
-      };
+      #
+      # `lib/source.nix` is the single definition of that filtered source, and
+      # it is shared with `overlay.nix`, `modules/sillytavern.nix` and
+      # `default.nix` so that all four build the SAME package. See that file
+      # for what happens when they drift apart.
+      source = import ./lib/source.nix { inherit lib; } ./.;
 
       mkOverlay =
         final: prev:

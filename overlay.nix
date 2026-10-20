@@ -16,14 +16,12 @@ let
 
   # The application source: THIS tree, filtered exactly as the flake does it.
   #
-  # Kept byte-identical to `source` in flake.nix. The two overlays must produce
-  # the same derivation — a divergence here means `pkgs.sillytavern` means two
-  # different things depending on which entry point the consumer reached for.
-  source = lib.cleanSourceWith {
-    src = ./.;
-    name = "sillytavern-source";
-    filter = import ./pkgs/sillytavern/filter.nix { inherit lib; };
-  };
+  # `lib/source.nix` holds the one definition, shared with `flake.nix`,
+  # `modules/sillytavern.nix` and `default.nix`. The two overlays must
+  # produce the same derivation — a divergence here means `pkgs.sillytavern`
+  # means two different things depending on which entry point the consumer
+  # reached for.
+  source = import ./lib/source.nix { inherit lib; } ./.;
 in
 {
   # `src` is passed EXPLICITLY. It must be, and this is not a style preference:

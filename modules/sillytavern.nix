@@ -44,13 +44,27 @@
   #
   # `mkDefault` means an explicit `services.sillytavern-nixos.package` still
   # wins, and the overlay's `pkgs.sillytavern` is used when a consumer sets that.
+  #
+  # `src` is the FILTERED source, from `lib/source.nix` — the same definition
+  # the flake's `packages` output and its overlay use. It used to be `../.`,
+  # the unfiltered tree, which meant:
+  #
+  #   * the package the module ran was a DIFFERENT store path from
+  #     `pkgs.sillytavern`, so applying the overlay built the same software
+  #     twice and `pkgs.sillytavern` did not mean "what the module runs";
+  #   * the module's package hash changed whenever a stray `node_modules`
+  #     appeared in the source tree, so a `path:` flake input pointing at a
+  #     developer's working copy was not reproducible;
+  #   * the unfiltered tree was copied into the store as the build input.
+  #
+  # See lib/source.nix for the full account.
   config.services.sillytavern-nixos.package = lib.mkDefault (
     pkgs.callPackage ../pkgs/sillytavern {
       version = (pkgs.lib.importJSON ../version.json).version;
       # Must be passed explicitly. `callPackage` otherwise auto-fills `src`
       # from `pkgs`, where it now resolves to the renamed `simple-revision-control`
       # package and fails with "The \"src\" package has been renamed".
-      src = ../.;
+      src = import ../lib/source.nix { inherit lib; } ../.;
     }
   );
 }

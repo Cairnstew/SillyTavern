@@ -6,7 +6,7 @@
 #   # in a non-flake configuration.nix
 #   imports = [
 #     (import (builtins.fetchTarball {
-#       url = "https://github.com/Cairnstew/nixos-sillytavern/archive/main.tar.gz";
+#       url = "https://github.com/Cairnstew/SillyTavern/archive/release.tar.gz";
 #     })).nixosModules.default
 #   ];
 #
@@ -46,31 +46,30 @@ let
   lib = (import <nixpkgs> { }).lib;
 
   # `modules/sillytavern.nix` cannot reference `self`, because a flake input's
-  # module scope has no path back to its own flake. So `package` defaults to a
-  # clear error over there, and something has to fill it in.
+  # module scope has no path back to its own flake — so it cannot ask the flake
+  # for its own `packages` output.
   #
-  # Built with `pkgs.callPackage` on the CONSUMER'S package set — the same trick
-  # flake.nix already uses. That matters: an earlier version of a sibling project
-  # imported `<nixpkgs>` here and handed the module its own package, which broke
-  # the moment the consumer passed their own `nixpkgs.pkgs`, with
-  # "attribute 'project-zomboid-server' missing". Deriving it from the module's
-  # own `pkgs` argument cannot go stale that way.
+  # It does not need to. It builds the package itself, from
+  # `pkgs.callPackage ./pkgs/sillytavern` on the CONSUMER's package set, with
+  # the filtered source from `lib/source.nix`. That matters: an earlier version
+  # of a sibling project imported `<nixpkgs>` here and handed the module its own
+  # package, which broke the moment the consumer passed their own
+  # `nixpkgs.pkgs`, with "attribute 'project-zomboid-server' missing".
+  # Deriving it from the module's own `pkgs` argument cannot go stale that way.
   #
-  # `mkDefault`, so an explicit `package` set by the consumer still wins.
-  sillytavernModule =
-    { pkgs, ... }:
-    {
-      imports = [ ./modules/sillytavern.nix ];
-
-      config.services.sillytavern-nixos = {
-        # `src` explicitly: see the note in flake.nix about `callPackage`
-        # auto-filling a `src` argument from the package set.
-        package = lib.mkDefault (pkgs.callPackage ./pkgs/sillytavern {
-          src = ./.;
-          version = (lib.importJSON ./version.json).version;
-        });
-      };
-    };
+  # This file used to set `services.sillytavern-nixos.package` as well, and the
+  # two definitions agreed only by accident. They no longer do: the module
+  # computes the source with the CONSUMER's `lib`, and this file could only
+  # offer `<nixpkgs>`'s — two `lib` versions whose `cleanSourceWith` need not
+  # agree on the output path, which is a "conflicting definition values" error
+  # waiting for a consumer whose nixpkgs and channel differ. One owner, one
+  # definition.
+  #
+  # `mkDefault` in the module, so an explicit `package` set by the consumer
+  # still wins.
+  sillytavernModule = {
+    imports = [ ./modules/sillytavern.nix ];
+  };
 in
 {
   # For `<nixpkgs-overlays>` consumers who want to reach the package from their
