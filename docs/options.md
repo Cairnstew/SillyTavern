@@ -15,6 +15,7 @@ For the per-account JSON surface — `settings.json`, presets, themes, world boo
 - [Escape hatches](#escape-hatches)
 - [Environment variables](#environment-variables)
 - [Files, per account](#files-per-account)
+- [Named profiles: `presets.*`](#named-profiles-presets)
 - [Not Nix-configurable](#not-nix-configurable)
 
 ---
@@ -48,6 +49,12 @@ Usually unnecessary: the module sets it with `mkDefault`, so an explicit value
 still wins and `pkgs.sillytavern` from the overlay is used when you set that.
 See [`installing.md`](installing.md) for why a bare nixpkgs `pkgs.sillytavern` is
 not a substitute.
+
+The module's default, the overlay's `pkgs.sillytavern` and the flake's
+`packages.<system>.sillytavern` are the **same derivation** — one build, not
+three. The `packageIdentity` check in `nix flake check` fails the build if
+they ever drift apart again, because the drift is invisible from the outside
+until the store fills with two copies of the same software.
 
 ## config — every key in config.yaml
 
@@ -229,6 +236,185 @@ services.sillytavern-nixos = {
   declared value every activation — note that it is *not* constant, since
   SillyTavern rewrites `settings.json` at runtime regardless.
 
+## Named profiles: `presets.*`
+
+SillyTavern's UI is full of dropdowns of **saved, named, importable and
+exportable items**: the Text Completion presets, the AI Response Configuration
+presets, the Instruct / Context / Sysprompt / Reasoning templates, the themes,
+the lorebooks, the quick-reply sets, the Moving UI layouts, the ComfyUI
+workflows.
+
+`presets` gives each of those a bucket, and each item a **name**:
+
+```nix
+services.sillytavern-nixos.presets = {
+  common = {
+    # a bucket, then a NAME
+    instruct."Alpaca".json = {
+      identifier = "alpaca";
+      input_sequence = "<|user|>";
+      output_sequence = "<|assistant|>";
+    };
+
+    themes."Azure".json = {
+      blur_strength = 11;
+      main_text_color = "rgba(171, 198, 223, 1)";
+    };
+
+    textGeneration."My Preset".json = { temperature = 0.9; };
+    worlds."Lore".json = { entries = { }; };
+  };
+
+  byUser.seanc.sysprompt."Roleplay".json = {
+    content = "Write {{char}} as {{user}} would.";
+  };
+};
+```
+
+The **directory is derived from the bucket**, so nobody has to know that the
+Text Completion presets live in a directory called `TextGen Settings`.
+
+### The buckets
+
+| Bucket | What it is | Where it goes |
+|---|---|---|
+| `textGeneration` | Text Completion presets | `TextGen Settings/` |
+| `openai` | AI Response Configuration presets | `OpenAI Settings/` |
+| `novel` | NovelAI presets | `NovelAI Settings/` |
+| `kobold` | KoboldAI Classic presets | `KoboldAI Settings/` |
+| `instruct` | Instruct templates | `instruct/` |
+| `context` | Context templates | `context/` |
+| `sysprompt` | System-prompt templates | `sysprompt/` |
+| `reasoning` | Reasoning templates | `reasoning/` |
+| `themes` | UI themes | `themes/` |
+| `movingUi` | Moving UI layouts | `movingUI/` |
+| `quickReplies` | Quick-reply sets | `QuickReplies/` |
+| `worlds` | World Info books | `worlds/` |
+| `workflows` | Saved ComfyUI workflows | `user/workflows/` |
+
+### Two things about names
+
+**Where the dropdown's label comes from is not uniform**, and getting it wrong
+is silent. For most buckets the label is the **file name**, so the key you
+write is what the user sees. For `instruct`, `context`, `sysprompt`,
+`reasoning`, `themes`, `movingUi` and `quickReplies` the label is a `name`
+field **inside** the JSON.
+
+So for those seven, the module **fills the `name` field in from the key** when
+it is missing — a preset can never appear in the dropdown as `undefined` — and
+**refuses** a `name` that disagrees with the key, because a preset whose label
+and file name differ is a preset nobody can find.
+
+**The name becomes a file name**, so it must not contain a path separator. The
+module refuses one that does.
+
+### `presets` and `files` are two views of the same files
+
+`files` states a path; `presets` derives one from a bucket and a name. They
+seed the same files, and declaring one file in **both** is an error rather
+than a merge — otherwise the `presets` declaration would quietly do nothing.
+
+`{ json = …; }` and `{ path = …; }` work exactly as they do in `files`, and so
+do the per-entry `policy` and `mode` knobs.
+
+### The buckets are checked against upstream's source
+
+The directory names and the label sources are **claims about upstream**, and a
+wrong one produces a file the server never reads — no error, no warning, an
+empty dropdown. So they are checked rather than trusted:
+
+- `presetsMatchUpstream` reads `USER_DIRECTORY_TEMPLATE` out of
+  `src/constants.js` and the API-id switch out of `src/endpoints/presets.js`,
+  and compares them with the module's own table.
+- The same check reads the client (`public/scripts/preset-manager.js`,
+  `power-user.js`, `QuickReplySet.js`) to confirm which buckets take their
+  label from inside the JSON.
+
+An upstream rename fails `nix flake check` rather than silently emptying a
+dropdown.
+
+### The settings are checked, not just accepted
+
+`settings.common` is a free-form blob, so a typo in it would be accepted
+silently and then ignored — the browser reads `settings.json` by direct
+property access, with no schema and no dotted-path resolver. The module
+therefore refuses three things at evaluation time:
+
+| Refused | Why |
+|---|---|
+| a path upstream does not have (`power_user.font_scal`) | written to disk, never read — it does nothing at all |
+| a key outside the 24 the browser writes (`my_own_key`) | the browser **deletes** it at the next save, so it looks applied until it is not |
+| a value of the wrong kind (`power_user.waifuMode = "false"`) | in JavaScript every non-empty string is TRUE, so the setting would be ON while the configuration says OFF |
+
+The list of real settings is **derived from upstream's own source**, not
+written out by hand: `lib/settings-inventory.json`, produced by
+`node scripts/extract_settings_inventory.mjs`. It holds all 410 leaf fields
+across the seven UI subtrees, with their types and upstream's defaults.
+`docs/settings-surface.md` is the human-readable map, with a classification of
+what should be Nix-defined and what is session state the UI owns.
+
+### The typed tree: `settingsExtra.*`
+
+`settings.common` is free-form, and it stays that way — it is the escape
+hatch, and it is what per-account overrides use. But every one of the 410
+settings is *also* a typed option, so the good path is the obvious one:
+
+```nix
+services.sillytavern-nixos = {
+  settingsExtra = {
+    powerUser = {
+      font_scale = 1.2;
+      chat_width = 60;
+      instruct.preset = "Alpaca";
+    };
+    oaiSettings = {
+      openai_max_context = 32768;
+      temp_openai = 0.7;
+      custom_url = "https://llm.example.com/v1";
+    };
+    worldInfoSettings.world_info_depth = 4;
+  };
+};
+```
+
+| Option | `settings.json` key | Fields |
+|---|---|---|
+| `settingsExtra.powerUser` | `power_user` | 182 |
+| `settingsExtra.oaiSettings` | `oai_settings` | 106 |
+| `settingsExtra.textGenerationSettings` | `textgenerationwebui_settings` | 61 |
+| `settingsExtra.naiSettings` | `nai_settings` | 24 |
+| `settingsExtra.kaiSettings` | `kai_settings` | 20 |
+| `settingsExtra.hordeSettings` | `horde_settings` | 4 |
+| `settingsExtra.worldInfoSettings` | `world_info_settings` | 13 |
+
+Three things to know about them:
+
+- **The names are upstream's own**, verbatim — `font_scale`, not
+  `fontScale`. These options mirror a JSON document, and a mirror that
+  renames things is a mirror you have to translate in your head.
+- **`null` means "not declared".** Every leaf is `nullOr <type>` with
+  `default = null`, and an undeclared setting is simply absent from the
+  file, so the account keeps upstream's own default. Upstream computes some
+  defaults at runtime — a theme colour is read out of the CSS — and pinning
+  them here would freeze them.
+- **A typo is an error, not a shrug.** `font_scal` is refused at
+  evaluation time, with the right spelling suggested:
+
+  ```
+  error: The option `services.sillytavern-nixos.settingsExtra.powerUser.font_scal'
+         does not exist. Definition values: …
+         Did you mean `services.sillytavern-nixos.settingsExtra.powerUser.font_scale'?
+  ```
+
+The tree is *generated* from the same inventory the guard uses, so it cannot
+drift from upstream: a setting added upstream becomes an option, and one
+removed upstream stops being accepted. `nix flake check` proves it both ways
+(`settingsTypedTree`, `settingsTypedTreeRefusesTypos`).
+
+**Precedence** is unchanged: `settingsExtra` is the base layer,
+`settings.common` overrides it, and `settings.byUser` overrides both. So the
+same leaf can be set in more than one place, and the more specific one wins.
+
 ## What this module writes at the data root
 
 Exactly two destinations, and both are Nix-authoritative — overwritten on every
@@ -275,7 +461,7 @@ Known limits, so you do not lose time looking for an option that is not there.
 |---|---|
 | **The UI language** | The locale is fetched relative to the page (`public/scripts/i18n.js`) and served straight out of the read-only package. There is no data-root override route upstream. The in-browser selector persists per *browser*, not per account. This needs a change to SillyTavern; see the draft issue in `ui-surface.md` §5.1. |
 | **More than one instance per host** | One option namespace, one `systemd.services.sillytavern` unit, one service account. `proxyUpstreams` is a list and `mkProxyUpstream` takes a `configName`, so the *API* is shaped for several; the module is not. |
-| **The shipped `default/content` set** | Presets, backgrounds and characters baked into the package and copied into the data root on first start. Reachable per account through `files`, but you cannot *remove* or *replace* the shipped set short of overriding `package`. |
+| **The shipped `default/content` set** | Presets, backgrounds and characters baked into the package and copied into the data root on first start. Reachable per account through `files` or `presets`, but you cannot *remove* or *replace* the shipped set short of overriding `package`. |
 | **`cookie-secret.txt`** | Generated on first start and written 0600. Unlike the other three secrets it has no `…File` option. |
 | **Chats** | Deliberately not seeded. They are the user's own writing, and `chats/` is created at runtime. |
 | **Vector-store documents** | The index is built at runtime from an embeddings API, so documents cannot be seeded offline. |

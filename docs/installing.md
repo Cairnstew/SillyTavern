@@ -19,7 +19,7 @@ that will otherwise block you.
 
 ```nix
 {
-  inputs.sillytavern.url = "github:Cairnstew/nixos-sillytavern";
+  inputs.sillytavern.url = "github:Cairnstew/SillyTavern";
 
   outputs = { nixpkgs, sillytavern, ... }: {
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
@@ -48,6 +48,21 @@ services.sillytavern-nixos.package =
 
 The module sets `package` itself when you do not, so this second form is only
 needed if something else in your configuration must influence the build.
+
+> The overlay is **not** required, and applying it does not build a second
+> copy of anything. The module, the overlay and the flake's `packages` output
+> all resolve to the same derivation — the `packageIdentity` check in
+> `nix flake check` fails the build if they ever drift apart again.
+>
+> What the overlay buys you is the NAME: `pkgs.sillytavern` becomes this
+> flake's build, so it can be used anywhere a package is expected (a reverse
+> proxy's `environment.systemPackages`, a `homeManager` module, another
+> flake's `nixpkgs.overlays`).
+>
+> Beware the name collision: nixos-unstable ships a `pkgs.sillytavern` of the
+> same version, and it is **not** this build. If you apply this overlay, yours
+> wins; if you do not, `pkgs.sillytavern` is nixpkgs' and is incompatible with
+> this module (see the warning below).
 
 > ⚠ **Do not point `package` at `pkgs.sillytavern` from a bare nixpkgs.** The
 > module's `package` option says "no package was supplied" if you import the
@@ -169,11 +184,69 @@ open one for you. It exposes the data you need to wire into whatever you use:
 
 ```nix
 proxy.upstreams = lib.mkMerge (
-  map inputs.sillytavern.lib.mkProxyUpstream config.services.sillytavern-nixos.proxyUpstreams
+  map inputs.sillytavern.lib.mkProxyUpstream
+    config.services.sillytavern-nixos.proxyUpstreams
 );
 ```
 
-See the `proxyUpstreams` option for the shape.
+…or, for the default instance, without declaring the list at all:
+
+```nix
+proxy.upstreams = [ inputs.sillytavern.lib.mkProxyUpstream { inherit config; } ];
+```
+
+### Four settings a proxy in front of SillyTavern gets wrong
+
+These are not opinions. Each produces a failure that looks like something else,
+and each is why `proxyUpstreams` carries the value instead of leaving it to be
+rediscovered in production.
+
+**1. Request body size.** `src/server-main.js` configures its body parsers with a
+`500mb` limit, because character cards, backgrounds, chat imports and
+`settings.json` are all uploaded as JSON. **nginx's `client_max_body_size`
+defaults to 1 MB.** Without raising it the first avatar upload fails with a bare
+`413`, and nothing in the SillyTavern journal explains it.
+
+```nix
+proxyUpstreams = [ { inherit (config) maxBodySize; # = "512m" } ];
+```
+
+**2. The `Host` header.** `config.hostWhitelist.enabled` makes
+`src/middleware/hostWhitelist.js` match `req.headers.host`. Behind a proxy that
+header carries the **public** name, not `localhost`, so enabling the whitelist
+without listing it rejects every request. The module asserts this combination.
+
+```nix
+config.hostWhitelist.enabled = true;
+config.hostWhitelist.hosts = [ "st.example.com" ];   # a leading dot = subdomain
+```
+
+**3. `X-Forwarded-For` must be REPLACED, not appended.**
+`config.enableForwardedWhitelist` defaults to **true**, and
+`src/express-common.js` prefers `x-real-ip`, then `cf-connecting-ip`, then the
+*first* `X-Forwarded-For` entry. An appending proxy lets a client send its own
+header with an address of their choosing still first — so `whitelist` and
+`rateLimiting.preferRealIpHeader` then trust a spoofed IP.
+
+In nginx that means `$remote_addr`, **not** `$proxy_add_x_forwarded_for`. Caddy
+replaces by default. Declaring it records the intent, and the module refuses
+`forwardedFor = "append"` while `enableForwardedWhitelist` is on:
+
+```nix
+proxyUpstreams = [ { inherit (config) forwardedFor; # = "replace" } ];
+```
+
+**4. Read timeout.** Most proxies default to 60 seconds of *inactivity* (nginx
+`proxy_read_timeout`). A long LLM generation streaming tokens over SSE can stall
+longer than that between chunks, and the symptom is a mid-answer `502` that reads
+like the model giving up. Set it above the longest expected gap between tokens —
+it resets on every write, so it does not have to cover the whole response.
+
+```nix
+proxyUpstreams = [ { inherit (config) readTimeout; # = "1h" } ];
+```
+
+See the `proxyUpstreams` option for the full shape.
 
 ## Terminating TLS in SillyTavern instead
 
@@ -207,7 +280,28 @@ config.ssl.keyPath  = "/etc/sillytavern/privkey.pem";
 ```
 
 …which means adding that directory to the unit's `ReadWritePaths` via
-`systemdOverrides`, since `ProtectSystem=strict` applies.
+`systemdOverrides`, since `ProtectSystem=strict` applies:
+
+```nix
+services.sillytavern-nixos.systemdOverrides = {
+  serviceConfig.ReadWritePaths = [ "/etc/sillytavern" ];
+};
+```
+
+> **The `serviceConfig.` prefix matters.** Unit-level entries in
+> `systemdOverrides` (`description`, `after`, `wantedBy`, …) and `serviceConfig`
+> entries (`Restart`, `LimitNOFILE`, `ReadWritePaths`, …) are different option
+> sets. Putting `Restart` at the top level fails with *"The option
+> `systemd.services.sillytavern.Restart` does not exist"*; putting
+> `ReadWritePaths` anywhere other than under `serviceConfig` fails the same way
+> the other direction.
+
+A `serviceConfig` block here is **merged** into the one this module builds, so
+the rest of the unit — `ExecStart`, `User`, `StateDirectory`, the hardening
+block — is preserved and only the keys you name change. (It used to be applied
+to the whole unit, where attrset `//` *replaces*: a single `serviceConfig` key
+silently discarded the entire block and left a unit that never started, with
+`nixos-rebuild` still reporting success.)
 
 If `ssl.enabled = true` and the server cannot open the certificate,
 `checkSslOptions` in `src/server-startup.js` exits during startup — which is why

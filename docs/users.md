@@ -191,21 +191,38 @@ sillytavern = {
   loginScript = true;
   url = "https://st.example.com";
 
+  # `curl` and `jq` are on PATH via `loginPackages`, which defaults to both.
   loginCommand = ''
     jar=$(mktemp)
     token=$(curl --fail-with-body --silent --show-error \
       --cookie-jar "$jar" --cookie "$jar" \
-      "${url}/csrf-token" | jq -r .token)
+      "$SILLYTAVERN_URL/csrf-token" | jq -r .token)
     curl --fail-with-body --silent --show-error \
       --cookie-jar "$jar" --cookie "$jar" \
       --header "X-CSRF-Token: $token" \
       --header 'Content-Type: application/json' \
       --data "{\"handle\":\"$ACCOUNT\",\"password\":\"$(cat \"$PASSWORD_FILE\")\"}" \
-      "${url}/api/users/login"
+      "$SILLYTAVERN_URL/api/users/login"
     rm -f "$jar"
   '';
+
+  # Anything else your command shells out to:
+  # loginPackages = with pkgs; [ curl jq coreutils ];
 };
 ```
+
+> **Use `$ACCOUNT` and `$SILLYTAVERN_URL`, not Nix interpolation.** The generated
+> script exports `ACCOUNT`, `SILLYTAVERN_URL` and `SILLYTAVERN_HOST` before
+> running `loginCommand`, and those are the whole contract. They are *shell*
+> variables: a Nix string is evaluated in the scope where you wrote it, where
+> `ACCOUNT` is not bound, so writing `"${ACCOUNT}"` fails at evaluation with
+> `undefined variable 'ACCOUNT'`. The same trap catches a half-written version
+> that interpolates the sibling option `url` — a Nix attribute set is not
+> recursive, so `url = …;` does not put `url` in scope on the next line either.
+>
+> `PASSWORD_FILE` is **yours** to set; the module has no opinion about where
+> passwords live and deliberately ships none. Export it from your own
+> `loginCommand` wrapper, or read it from a path you control.
 
 > The password belongs in a file you control, not in this string. A login
 > script is a shell script on disk; `sillytavern.loginCommand` is your own

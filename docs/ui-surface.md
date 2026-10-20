@@ -199,7 +199,7 @@ All of these are already reachable through `files.byUser.<handle>."<dir>/<name>.
 | Group | Route | Status |
 |---|---|---|
 | `config.yaml`, 51 keys | `config.*`, `cli.*` | **done** |
-| `settings.json` any path | `settings.common` / `settings.byUser` | **done** (deep-merged) |
+| `settings.json` any path | `settings.common` / `settings.byUser` | **done** (deep-merged), and now **checked** — see `docs/settings-surface.md` |
 | Any per-account file | `files.common` / `files.byUser` | **done** |
 | Provider API keys | `secrets.byUser` | **done** |
 | Accounts | `users.<handle>` | **done** |
@@ -220,6 +220,27 @@ result: all three subtrees and all three file paths landed as documented.
 > nothing. `seedHandles` now includes `attrNames cfg.users` and `default-user`.
 > Verified live: the single-account default case now seeds. Regression check:
 > `seedSpecCoversCommon`.
+
+### 4.0 The settings surface is now enumerated, and enforced
+
+This document maps the UI surface by hand. The *settings* part of it is not by
+hand any more: `lib/settings-inventory.json` is derived from upstream's own
+sources by `scripts/extract_settings_inventory.mjs` and lists all 410 leaf
+fields of the seven `settings.json` subtrees, with their types and upstream's
+defaults.
+
+That changes what "reachable" means. Every one of those fields was already
+reachable through `settings.common` — but nothing enumerated them, so a typo
+was accepted silently and did nothing. The module now refuses:
+
+* a path upstream does not have,
+* a key outside the 24 the browser writes (the browser deletes those at the
+  next save),
+* a value of the wrong kind.
+
+The human-readable map, with the classification of what should be Nix-defined
+and what is session state, is `docs/settings-surface.md`. This document
+remains the map of the *UI* — the markup, the drawers, the preset managers.
 
 ### 4.1 The shadowing trap: `services.sillytavern`
 
