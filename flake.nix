@@ -153,15 +153,24 @@
               # The app's own toolchain. `npm` comes bundled with nodejs, and
               # there is no top-level `npm` attribute in nixpkgs to add.
               nodejs
-              # `pkgs.eslint`, not `pkgs.nodePackages.eslint`: nodePackages was
-              # removed from nixpkgs; the packages moved to the top level.
-              eslint
 
               # The activation-time helpers. scripts/st_seed_users.py uses only
               # the standard library, so this is for running the tests and for
               # anyone extending it — not a runtime dependency of the module.
               python3
               python3Packages.pytest
+
+              # The task runner the justfile targets. `just develop <cmd>`
+              # runs a command in this shell via `nix develop --command`,
+              # which is how the justfile reaches everything below.
+              just
+
+              # Nix linting and formatting. NOT wired to the `formatter`
+              # output — see the note there — so these are opt-in tools.
+              statix
+              deadnix
+              alejandra
+              shellcheck
 
               git
               jq
@@ -174,9 +183,16 @@
               export SILYTAVERN_SOURCE="$PWD"
               echo "sillytavern dev shell — node $(node --version), python $(python3 --version)"
               echo
-              echo "  npm ci                    install the app's dependencies"
-              echo "  npm start                 run the server against ./data"
-              echo "  python3 -m pytest tests/  the seeder's tests"
+              echo "  just --list              every task; the justfile is the entry point"
+              echo "  just develop '<cmd>'     run a command in this shell (non-interactive)"
+              echo "  just test                the seeder's Python suites"
+              echo "  just test-live           build a server, boot it, assert over HTTP"
+              echo "  just check               every flake check — what CI runs"
+              echo "  just audit               the config-surface coverage audit"
+              echo
+              echo "eslint is NOT in this shell on purpose: nixpkgs ships eslint 10, which"
+              echo "refuses to read the repo's .eslintrc.cjs. The lint recipe uses the"
+              echo "version package.json pins (v8), so run 'just npm-ci' first."
               echo
               echo "To run the module against this tree, point the package at it:"
               echo
@@ -200,13 +216,18 @@
           pkgs = pkgsFor system;
         in
         {
+          # `meta` is not optional in practice: `nix flake check` warns for
+          # every app that omits it, and the warning is noise that trains people
+          # to ignore the output of the one command that gates this project.
           default = {
             type = "app";
             program = "${self.packages.${system}.sillytavern}/bin/sillytavern";
+            meta.description = "Run the SillyTavern server straight from the store";
           };
           seeder = {
             type = "app";
             program = "${pkgs.python3} ${./scripts/st_seed_users.py}";
+            meta.description = "Seed SillyTavern accounts into a data root";
           };
         }
       );

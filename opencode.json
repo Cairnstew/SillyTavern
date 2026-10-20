@@ -1,0 +1,4 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [".opencode/skills/nix-coverage/COVERAGE.md"]
+}
