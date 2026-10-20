@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import re
 import stat
 import subprocess
 import sys
@@ -22,6 +24,19 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 
 import st_seed_files as seeder  # noqa: E402
+
+
+def _repo_root() -> Path:
+    """Where the application sources live.
+
+    `ST_REPO_ROOT` when the sandboxed `seeder` check stages them, otherwise the
+    checkout this file sits in. Exported rather than searched for, so a change
+    in either place fails loudly instead of quietly finding nothing.
+    """
+    env = os.environ.get("ST_REPO_ROOT")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parent.parent
 
 
 def write_json(path: Path, value) -> None:
@@ -136,16 +151,77 @@ class PathSafetyTests(unittest.TestCase):
         self._assertRefused("_errors/sub/unauthorized.html")
 
     def test_error_page_allowlist_matches_upstream(self):
-        # Guards against the seeder drifting from src/. If upstream adds a fifth
-        # page this fails and the error names the missing ones.
-        expected = {
-            "forbidden-by-whitelist.html",
-            "host-not-allowed.html",
-            "unauthorized.html",
-            "url-not-found.html",
-        }
-        self.assertEqual(seeder.ALLOWED_ERROR_PAGES, expected)
+        # Reads the actual call sites in src/ rather than a second hardcoded
+        # copy of the list.
+        #
+        # The previous version compared `seeder.ALLOWED_ERROR_PAGES` against a
+        # literal that lived in this file, which could only fail if someone
+        # edited the seeder and forgot to edit the test — it could not detect
+        # upstream adding or removing an error page, which is the one thing its
+        # own comment claimed to guard.
+        #
+        # Upstream hardcodes each page at a separate site in the source; grep
+        # them out and compare as a set.
+        repo_root = _repo_root()
+        found = set()
+        for js in (repo_root / "src").rglob("*.js"):
+            text = js.read_text(encoding="utf-8", errors="replace")
+            found |= {
+                name
+                # Upstream spells it `path.join(DATA_ROOT, '_errors', 'name.html')`
+                # — the directory and the filename are two separate arguments,
+                # so the join between them is a quote, a comma and a quote.
+                for name in re.findall(
+                    r"_errors['\"]\s*,\s*['\"]([\w-]+\.html)", text
+                )
+            }
+        self.assertTrue(
+            found,
+            "no _errors/*.html references found under src/ — the grep is wrong, "
+            "not the seeder",
+        )
+        self.assertEqual(
+            seeder.ALLOWED_ERROR_PAGES,
+            found,
+            "the seeder's allowlist has drifted from src/; update "
+            "scripts/st_seed_files.py",
+        )
         self.assertNotIn("_errors", seeder.RESERVED_TOP_LEVEL)
+
+    def test_reserved_names_match_the_nix_assertions(self):
+        """The Nix side mirrors this deny-list; keep the two copies honest.
+
+        `modules/assertions.nix` refuses the same paths at EVAL time, which is
+        strictly better than refusing them at activation — but only if the two
+        lists agree. Nothing else connects them, so this test is what stops the
+        Nix copy silently going stale: change one without the other and this
+        fails naming both.
+        """
+        repo_root = _repo_root()
+        assertions = (repo_root / "modules" / "assertions.nix").read_text(
+            encoding="utf-8"
+        )
+
+        for name in seeder.RESERVED_BASENAMES:
+            with self.subTest(reserved=name):
+                self.assertIn(
+                    f'"{name}"', assertions, f"{name} is reserved in Python but "
+                    "not mirrored in modules/assertions.nix",
+                )
+
+        for name in seeder.RESERVED_TOP_LEVEL:
+            with self.subTest(reserved=name):
+                self.assertIn(
+                    f'"{name}"', assertions, f"{name} is reserved in Python but "
+                    "not mirrored in modules/assertions.nix",
+                )
+
+        for name in seeder.ALLOWED_ERROR_PAGES:
+            with self.subTest(error_page=name):
+                self.assertIn(
+                    f'"{name}"', assertions, f"{name} is allowlisted in Python "
+                    "but not mirrored in modules/assertions.nix",
+                )
 
     def test_traversal_that_normalises_back_inside_is_still_refused(self):
         # `a/../b` stays inside the root, but the `..` is still a caller mistake
@@ -476,6 +552,120 @@ class SecretsTests(unittest.TestCase):
             json.loads((self.user / "settings.json").read_text())["main_api"], "custom"
         )
         self.assertIn("api_key_openai", self.secrets_json())
+
+
+class DirectoryTreeTests(unittest.TestCase):
+    """A per-account UI extension is a DIRECTORY, not a file.
+
+    `src/endpoints/extensions.js` installs one into
+    `<user>/extensions/<name>/` as a tree of JS plus a manifest. Before this,
+    pointing `path` at a directory failed with `Is a directory` — and because
+    that is an `OSError` rather than a `SeedError` it exited 1 and stopped the
+    whole activation's seeding, so one extension in `files.byUser` took the
+    service down with it.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+        self.src = os.path.join(self.tmp, "src-ext")
+        os.makedirs(os.path.join(self.src, "lib"))
+        self.write(os.path.join(self.src, "manifest.json"), '{"display_name":"Mine"}')
+        self.write(os.path.join(self.src, "index.js"), "console.log(1)\n")
+        self.write(os.path.join(self.src, "lib", "helper.js"), "export default 1\n")
+
+        self.root = os.path.join(self.tmp, "data")
+        os.makedirs(os.path.join(self.root, "zoe"))
+
+    def write(self, path: str, text: str) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def read(self, path: str) -> str:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def spec(self, rel: str, **extra) -> str:
+        path = os.path.join(self.tmp, "spec.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {"users": {"zoe": {"files": {rel: {"path": self.src, **extra}}}}}, fh
+            )
+        return path
+
+    def run_seed(self, rel: str, policy: str = "missing", **extra) -> int:
+        return subprocess.call(
+            [
+                sys.executable,
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "st_seed_files.py"),
+                "--data-root", self.root,
+                "--spec", self.spec(rel, **extra),
+                "--policy", policy,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def target(self, rel: str) -> str:
+        return os.path.join(self.root, "zoe", rel)
+
+    def test_copies_the_whole_tree(self) -> None:
+        target = self.target("extensions/mine")
+        self.assertEqual(self.run_seed("extensions/mine"), 0)
+        self.assertEqual(self.read(os.path.join(target, "manifest.json")), '{"display_name":"Mine"}')
+        self.assertEqual(self.read(os.path.join(target, "lib", "helper.js")), "export default 1\n")
+
+    def test_applies_the_entry_mode_to_every_file(self) -> None:
+        target = self.target("extensions/mine")
+        self.run_seed("extensions/mine", mode="0644")
+        for rel in ("manifest.json", "index.js", "lib/helper.js"):
+            mode = stat.S_IMODE(os.stat(os.path.join(target, rel)).st_mode)
+            self.assertEqual(oct(mode), oct(0o644), rel)
+
+    def test_missing_policy_leaves_an_existing_tree_alone(self) -> None:
+        target = self.target("extensions/mine")
+        self.run_seed("extensions/mine")
+        self.write(os.path.join(target, "index.js"), "// edited by the user\n")
+        self.run_seed("extensions/mine", policy="missing")
+        self.assertEqual(self.read(os.path.join(target, "index.js")), "// edited by the user\n")
+
+    def test_overwrite_policy_restores_it(self) -> None:
+        target = self.target("extensions/mine")
+        self.run_seed("extensions/mine")
+        self.write(os.path.join(target, "index.js"), "// edited by the user\n")
+        self.run_seed("extensions/mine", policy="overwrite")
+        self.assertEqual(self.read(os.path.join(target, "index.js")), "console.log(1)\n")
+
+    def test_overwrite_never_deletes_files_the_source_dropped(self) -> None:
+        # A seed, not a sync: removing a file from the Nix expression must not
+        # delete somebody's work from their account.
+        target = self.target("extensions/mine")
+        self.run_seed("extensions/mine")
+        extra = os.path.join(target, "notes.md")
+        self.write(extra, "mine\n")
+        os.remove(os.path.join(self.src, "index.js"))
+        self.run_seed("extensions/mine", policy="overwrite")
+        self.assertTrue(os.path.exists(extra))
+
+    def test_a_regular_file_still_works(self) -> None:
+        plain = os.path.join(self.tmp, "theme.json")
+        self.write(plain, "{}")
+        with open(self.spec("themes/t.json"), "w", encoding="utf-8") as fh:
+            json.dump({"users": {"zoe": {"files": {"themes/t.json": {"path": plain}}}}}, fh)
+        code = subprocess.call(
+            [
+                sys.executable,
+                os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts", "st_seed_files.py"),
+                "--data-root", self.root,
+                "--spec", os.path.join(self.tmp, "spec.json"),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(self.read(self.target("themes/t.json")), "{}")
 
 
 class PerEntryOverridesTests(unittest.TestCase):

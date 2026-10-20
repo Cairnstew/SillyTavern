@@ -82,7 +82,9 @@ let
       outputHashMode = "recursive";
       # Filled in by the first `nix build`; see the note in
       # pkgs/sillytavern/default.nix about why this must not be guessed.
-      outputHash = lib.fakeHash;
+      # Derived with `caCertFile` pointed at `pkgs.cacert` (the store path),
+      # not a host path — the sandbox cannot see `/etc/ssl/certs`.
+      outputHash = "sha256-qe7ek9Yd6879sP3spf0ZYCbpf5ZcTLe3UyvMm5n5qOs=";
     };
 
 in
@@ -173,6 +175,66 @@ rec {
         }
       ];
     };
+
+  # ── 0. The module, the overlay and the flake agree on ONE package ───────────
+  #
+  # The invariant: the package the module RUNS is the package the overlay
+  # exposes as `pkgs.sillytavern`, and both are built from the FILTERED
+  # source.
+  #
+  # It is easy to state and easy to break, because the four places that build
+  # this package (the flake's `packages` output, the flake's overlay, the
+  # module's default `package`, and the non-flake `default.nix`) each spelled
+  # out the source themselves. Two of them used the UNFILTERED tree, and the
+  # consequences were observable from outside:
+  #
+  #   * `pkgs.sillytavern` and "what the module runs" were DIFFERENT store
+  #     paths, so applying the overlay built the same software twice and
+  #     `pkgs.sillytavern` did not mean "the package the module runs";
+  #   * the module's package hash changed whenever a stray `node_modules`
+  #     appeared in the source tree, so a `path:` flake input pointing at a
+  #     developer's working copy was not reproducible;
+  #   * the unfiltered tree was copied into the store as the build input.
+  #
+  # So this check is worth its weight: it is a consumer-visible property, and
+  # nothing else in the suite would notice its loss.
+  packageIdentity =
+    pkgs:
+    let
+      # The module's default package, with the module imported the way a
+      # consumer imports it — no explicit `package`, so the module's own
+      # `mkDefault` is what supplies it.
+      system = evalSystem pkgs { services.sillytavern-nixos.enable = true; };
+      modulePackage = system.config.services.sillytavern-nixos.package;
+
+      # The same package as the overlay exposes it. `overlay.nix` is applied
+      # to the SAME package set the module sees, which is what a consumer
+      # who writes `nixpkgs.overlays = [ … ]` gets.
+      overlayPackage = (pkgs.extend (import ../overlay.nix)).sillytavern;
+
+      # The filtered source, computed exactly as `lib/source.nix` does. The
+      # module and the overlay must BOTH be building from this.
+      filteredSource = import ../lib/source.nix { inherit lib; } ../.;
+    in
+    # The module's package and the overlay's package are the SAME derivation.
+    assert modulePackage.outPath == overlayPackage.outPath;
+    # Both are built from the FILTERED source, not the raw tree. The raw tree
+    # is a different store path from the filtered one whenever the checkout
+    # carries anything the filter drops — which is exactly the case this
+    # check exists to catch, so it cannot be asserted by comparing two
+    # filtered paths. What can be asserted is that neither package's source
+    # is the unfiltered repository root.
+    #
+    # `passthru.source`, not `src`: `src` is a function ARGUMENT of the
+    # package function, so it is not an attribute of the built derivation.
+    # `passthru.source` is the resolved value of that argument.
+    assert modulePackage.source.outPath == filteredSource.outPath;
+    assert overlayPackage.source.outPath == filteredSource.outPath;
+    pkgs.runCommand "sillytavern-check-package-identity" { }
+      ''
+        echo "PASS package-identity (module, overlay and flake share one package)"
+        touch "$out"
+      '';
 
   # ── 1. The module evaluates and produces a sane unit ────────────────────────
   #
@@ -281,9 +343,12 @@ rec {
       # the same name and make this `pkgs.callPackage <itself>`, which is an
       # infinite recursion rather than an error you can read.
       yamlPkg = pkgs.callPackage yamlPackage {
-        # `/etc/ssl` is the NixOS convention; absent on non-NixOS hosts,
-        # where the plain derivation still works against a clean network.
-        caCertFile = if builtins.pathExists /etc/ssl/certs then "/etc/ssl/certs/ca-bundle.crt" else null;
+        # A STORE PATH, not a host path. The build sandbox cannot see
+        # `/etc/ssl/certs/ca-bundle.crt` — it is not a declared dependency —
+        # so `NODE_EXTRA_CA_CERTS` pointed at nothing and Node fell back to
+        # its built-in CA, which lacks this network's issuer. `pkgs.cacert`
+        # ships the identical bundle as a store path the sandbox can read.
+        caCertFile = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
       };
 
       # The three credentials the module strips from the render. Values are
@@ -509,29 +574,15 @@ rec {
   # wrong configuration is rejected by `nixos-rebuild` — approximated by
   # asserting the option combination is at least *reachable* and that the
   # module's own guardrails evaluate.
-  assertionsAreWired =
-    pkgs:
-    let
-      system = evalSystem pkgs {
-        services.sillytavern-nixos.enable = true;
-        services.sillytavern-nixos.config.enableUserAccounts = true;
-        services.sillytavern-nixos.config.listen = true;
-        services.sillytavern-nixos.users.guest = { };
-      };
-      # With a declared user and no password file and no SSO, the assertion set
-      # must be non-empty (the passwordless-account assertion).
-      assertionCount = builtins.length system.config.assertions;
-    in
-    pkgs.runCommand "sillytavern-check-assertions-wired" { } ''
-      count=${toString assertionCount}
-      if [ "$count" -ge 2 ]; then
-        echo "PASS assertions-wired ($count assertions declared)"
-      else
-        echo "FAIL assertions-wired: only $count assertions" >&2
-        exit 1
-      fi
-      touch "$out"
-    '';
+  # The application source, as the package sees it, so the staged `repo/src` is
+  # the same tree the tests would read in a checkout.
+  repoSrc = lib.cleanSourceWith {
+    src = ../src;
+    name = "sillytavern-src";
+    filter = name: type:
+      let base = baseNameOf (toString name);
+      in !(builtins.elem base [ "node_modules" "dist" ]);
+  };
 
   # The seeder's own tests, including the scrypt-vs-Node cross-check.
   seeder =
@@ -547,8 +598,26 @@ rec {
         # `nix-tests/`, NOT `tests/` — that is upstream's JavaScript suite.
         cp -r ${../nix-tests} ./nix-tests
         cp -r ${../scripts} ./scripts
-        chmod -R u+w ./nix-tests ./scripts
+
+        # `test_seed_files.py` now reads the error-page allowlist out of the
+        # real sources instead of comparing two hardcoded copies of it, and
+        # checks the Nix-side mirror of the deny-list stays in sync. Both need
+        # files outside `nix-tests/` and `scripts/`.
+        #
+        # `src/` is the whole tree rather than the four files, because the test
+        # greps it itself and a filtered copy would make it pass vacuously on a
+        # near-empty directory. It is only read, and copied with the repo's own
+        # source filter.
+        mkdir -p ./repo/modules
+        cp -r ${repoSrc} ./repo/src
+        cp ${../modules/assertions.nix} ./repo/modules/assertions.nix
+        chmod -R u+w ./nix-tests ./scripts ./repo
         cd ./nix-tests
+
+        # The tests resolve the repo root by walking up from this file, which
+        # inside the sandbox is ./repo (not the checkout). Set explicitly
+        # rather than searched for, so a layout change fails loudly.
+        export ST_REPO_ROOT="$PWD/../repo"
         # BOTH suites. `test_seed_files.py` was written alongside the first and
         # never wired in here, so the JSON seeding path — settings merge, path
         # confinement, secrets.json — had passing tests that CI never ran.
@@ -557,12 +626,308 @@ rec {
         touch "$out"
       '';
 
-  # NOTE: there is deliberately no separate "renderer" check. `renderers.nix` would
-  # test the same code paths as `configYamlRoundTrip` against synthetic inputs,
-  # and every shape the renderer has to handle — quoted IPv6 wildcards, nulls,
-  # empty lists, integer lists, strings that look like booleans — appears in
-  # upstream's real document, which that check already round-trips through the
-  # same parser. Synthetic cases would be a second, weaker source of truth.
+  # ── 6. Every guard actually FIRES ─────────────────────────────────────────
+  #
+  # This replaces a check that could not fail. It counted NIXOS'S OWN assertion
+  # list (which is over 900 entries) and asserted the count was `>= 2`, so it
+  # proved nothing about this module — measured, the floor for a module-less
+  # system is around 904. Its comment claimed "every assertion that is MEANT to
+  # fire must actually fire"; it tested none of them.
+  #
+  # What follows is a real reachability matrix. Each row is a configuration that
+  # is SILENTLY WRONG, plus a substring that must appear in one of the failing
+  # assertion messages. A row passes only if that specific guard fires, so a
+  # guard that is deleted, renamed, or made unfalsifiable by an upstream change
+  # turns its own row red rather than disappearing quietly.
+  #
+  # Substring, not exact message, on purpose: the messages are prose and should
+  # stay editable. What must not drift is the SUBJECT of the guard.
+  #
+  # Each needle must fit on ONE line of the message. The messages are wrapped
+  # prose, and a needle that spans a wrap ("names paths the seeder refuses" —
+  # the file has a newline and indent after "seeder") can never match, so the
+  # row fails for a reason that has nothing to do with the guard it is testing.
+  #
+  # `ourFailuresMatching` (above) already narrows to this module's assertions,
+  # so an unrelated NixOS failure cannot accidentally satisfy a row.
+  guardsFire =
+    pkgs:
+    let
+      # Every row needs authentication set up, or the "no authentication"
+      # guards fire for the wrong reason and every row would pass spuriously.
+      # Authentication is set up on EVERY row. Without it the "no
+      # authentication configured" guard fires on all of them, and a row that
+      # only ever sees that message passes for the wrong reason — or, worse, the
+      # row it was meant to test never gets to run.
+      #
+      # `enable = true` is load-bearing and easy to miss: modules/assertions.nix
+      # wraps its entire list in `lib.mkIf cfg.enable`, so a row that forgets it
+      # evaluates a system with NO guards at all and reports every one of them
+      # dead. `evalSystem` does not enable the module either — that is the
+      # consumer's job, and every other check that wants assertions says so.
+      baseConfig = {
+        enable = true;
+        config.enableUserAccounts = true;
+        users.seanc.passwordFile = pkgs.writeText "pw" "not-a-real-password";
+      };
+
+      # `withConfig` MERGES into `config` rather than replacing it.
+      #
+      # The naive `auth // { config.ssl.keyPassphrase = …; }` is wrong in a way
+      # that looks right: attrset `//` replaces, so the whole `config` subtree
+      # is discarded — including `enableUserAccounts = true` — and every such
+      # row silently ends up testing "users were declared but accounts are
+      # disabled" instead. That is the same replace-vs-merge trap this project
+      # just fixed in `systemdOverrides`, met again in its own test.
+      withConfig =
+        extra:
+        # `extra` is applied in the middle so its non-`config` keys (`files.*`,
+        # `users.*`, `proxyUpstreams`) actually land, and `config` is then forced
+        # to the MERGE so the base's `enableUserAccounts = true` survives.
+        #
+        # Both orders are wrong in isolation, and both fail the same way: every
+        # `files.*` row silently evaluates to a system with nothing to seed, so
+        # the guard under test never fires and the row reports itself DEAD.
+        baseConfig // extra // {
+          config = baseConfig.config // (extra.config or { });
+        };
+
+      rows = [
+        {
+          name = "declared-users-without-accounts";
+          module = {
+            services.sillytavern-nixos = baseConfig // {
+              config = baseConfig.config // { enableUserAccounts = false; };
+            };
+          };
+          expect = "users were declared but";
+        }
+        {
+          name = "no-authentication-at-all";
+          # Built WITHOUT `baseConfig`, deliberately. Its guard reads
+          # `cfg.config.enableUserAccounts || cfg.users != { }`, so any declared
+          # account satisfies it — and `withConfig` always declares one. A
+          # forgotten guard would look "ok" here for the wrong reason.
+          module = {
+            services.sillytavern-nixos = {
+              enable = true;
+              config = { listen = true; };
+            };
+          };
+          expect = "no authentication is configured";
+        }
+        {
+          name = "plaintext-ssl-passphrase";
+          module = {
+            services.sillytavern-nixos = withConfig {
+              config.ssl.keyPassphrase = "hunter2";
+            };
+          };
+          expect = "config.ssl.keyPassphrase is set";
+        }
+        {
+          name = "plaintext-basic-auth-password";
+          # BOTH halves, because the guard reads
+          # `password == "password" || passwordFile == null`: a non-default
+          # password with NO passwordFile is fine, because nothing renders it
+          # anywhere. It is the pair — a secret set twice, once into the store —
+          # that is refused.
+          module = {
+            services.sillytavern-nixos = withConfig {
+              config.basicAuthUser.password = "hunter2";
+              basicAuthUser.passwordFile = pkgs.writeText "pw" "hunter2";
+            };
+          };
+          expect = "config.basicAuthUser.password is set";
+        }
+        {
+          name = "files-entry-without-json-or-path";
+          module = {
+            services.sillytavern-nixos = withConfig {
+              files.common."themes/x.json".json = null;
+            };
+          };
+          expect = "must set exactly one";
+        }
+        {
+          name = "secrets-json-through-files";
+          module = {
+            services.sillytavern-nixos = withConfig {
+              files.common."secrets.json".json = { };
+            };
+          };
+          expect = "do not seed `secrets.json` through";
+        }
+        {
+          name = "seed-handle-not-declared";
+          module = {
+            services.sillytavern-nixos = withConfig {
+              files.byUser.nobody."themes/x.json".json = { };
+            };
+          };
+          expect = "every handle in";
+        }
+        {
+          name = "reserved-path-in-files";
+          module = {
+            services.sillytavern-nixos = withConfig {
+              files.common."backups/x.json".json = { };
+            };
+          };
+          expect = "entries name paths the seeder";
+        }
+        {
+          name = "bad-file-mode";
+          module = {
+            services.sillytavern-nixos = withConfig {
+              files.common."themes/x.json" = { json = { }; mode = "644"; };
+            };
+          };
+          expect = "entry `mode` must be a 4-digit";
+        }
+        {
+          name = "host-whitelist-without-hosts";
+          module = {
+            services.sillytavern-nixos = withConfig {
+              config.hostWhitelist.enabled = true;
+              config.hostWhitelist.hosts = [ ];
+            };
+          };
+          expect = "config.hostWhitelist.enabled is true but";
+        }
+        {
+          name = "proxy-appends-forwarded-for";
+          module = {
+            services.sillytavern-nixos = withConfig {
+              proxyUpstreams = [ { name = "st"; forwardedFor = "append"; } ];
+            };
+          };
+          expect = "a proxyUpstream sets forwardedFor";
+        }
+        {
+          name = "passwordless-account-without-sso";
+          module = {
+            services.sillytavern-nixos = {
+              enable = true;
+              config.enableUserAccounts = true;
+              users.guest = { };
+            };
+          };
+          expect = "a passwordless account with neither SSO";
+        }
+        {
+          name = "settings-key-that-upstream-does-not-have";
+          module = {
+            services.sillytavern-nixos = withConfig {
+              settings.common.power_user.font_scal = 1.2;
+            };
+          };
+          expect = "not settings SillyTavern has";
+        }
+        {
+          name = "settings-key-outside-the-clients-save-payload";
+          module = {
+            services.sillytavern-nixos = withConfig {
+              settings.common.my_own_key = 1;
+            };
+          };
+          expect = "the browser DISCARDS them";
+        }
+      ];
+
+      # Self-contained rather than reusing `ourFailuresMatching`.
+      #
+      # Two things that helper does not do, and both are needed here:
+      #   * it takes a CONFIG, not a system — easy to get backwards, and the
+      #     resulting error names `attribute 'assertions' missing` on an
+      #     attrset that visibly has one;
+      #   * it returns every failing assertion, whereas this needs to ask
+      #     "does ANY message match this needle", which is a different filter
+      #     order and worth being able to read locally.
+      #
+      # `one` mirrors `inspectedAssertions`: BOTH `assertion` and `message` go
+      # through `tryEval`, because forcing the message of an unrelated NixOS
+      # assertion walks `fileSystems` and dies on `attribute 'cycle' missing`.
+      firingMessages =
+        row:
+        let
+          evaluated = builtins.map one (evalSystem pkgs row.module).config.assertions;
+          one =
+            a:
+            let
+              value = builtins.tryEval (a.assertion or false);
+              text = builtins.tryEval (builtins.match ".*services\\.sillytavern-nixos:.*" (a.message or ""));
+            in
+            {
+              passed = value.success && value.value == true;
+              message = if text.success && text.value != null then (a.message or "") else null;
+            };
+        in
+        builtins.map (e: e.message) (builtins.filter (e: !e.passed && e.message != null) evaluated);
+
+      evaluate =
+        row:
+        builtins.filter (m: builtins.match ".*${row.expect}.*" m != null) (firingMessages row);
+
+      # `name=hits` pairs, rendered into the shell script below.
+      #
+      # Reporting in SHELL rather than asserting in Nix is deliberate: a Nix
+      # `assert` on this says only "a list is not empty", which is useless when
+      # the failure is "the guard you were relying on cannot fire any more".
+      # The script names every dead guard instead.
+      results = builtins.map (row: {
+        inherit (row) name;
+        firing = builtins.length (firingMessages row);
+        hits = builtins.length (evaluate row);
+      }) rows;
+
+      # The mirror image: a valid configuration must trip NONE of them, or the
+      # matrix above would pass for the wrong reason.
+      clean = builtins.length (
+        firingMessages {
+          module = {
+            services.sillytavern-nixos = withConfig {
+              proxyUpstreams = [ { name = "st"; forwardedFor = "replace"; } ];
+              files.common."themes/ok.json" = { json = { }; policy = "overwrite"; mode = "0644"; };
+            };
+          };
+        }
+      );
+    in
+    pkgs.runCommand "sillytavern-check-guards-fire" { }
+      ''
+        status=0
+
+        echo "guards-fire: ${toString (builtins.length rows)} guards"
+
+        for row in ${lib.concatMapStringsSep " " (r: "\"${r.name} ${toString r.firing} ${toString r.hits}\"") results}; do
+          set -- $row
+          name=$1; firing=$2; hits=$3
+          if [ "$hits" = "0" ]; then
+            echo "  DEAD  $name (assertions firing: $firing, messages matching: $hits)" >&2
+            status=1
+          else
+            echo "  ok    $name (firing: $firing, matching: $hits)"
+          fi
+        done
+
+        if [ "${toString clean}" != "0" ]; then
+          echo "" >&2
+          echo "guards-fire: a VALID configuration tripped ${toString clean} assertion(s):" >&2
+          status=1
+        fi
+
+        if [ "$status" != "0" ]; then
+          echo "" >&2
+          echo "A dead guard means the assertion it names no longer fires, so the" >&2
+          echo "configuration it protects is no longer caught at eval time." >&2
+          exit 1
+        fi
+
+        echo "PASS guards-fire"
+        touch "$out"
+      '';
+
 
   # ── 4. Regression: `.common` options actually reach an account ────────────
   #
@@ -604,7 +969,7 @@ rec {
       singleAccount = specOf {
         services.sillytavern-nixos = {
           enable = true;
-          settings.common = { main_api = "openai"; oai_settings.temp_openai = 0.77; };
+          settings.common = { main_api = "openai"; oai_settings = { temp_openai = 0.77; }; };
           files.common."instruct/Default.json".json = { name = "d"; content = "c"; };
         };
       };
@@ -1121,6 +1486,352 @@ rec {
     in
     offenders;
 
+  # ── 16. `systemdOverrides` merges instead of replacing ──────────────────────
+  #
+  # The bug this exists for: `systemd.services.sillytavern` ended in a plain
+  # `// cfg.systemdOverrides`, and attrset `//` REPLACES. One
+  # `serviceConfig.ReadWritePaths` therefore reduced the whole unit's
+  # serviceConfig to `[ "ExecStartPre" "ReadWritePaths" ]` — no ExecStart, no
+  # User, no StateDirectory, no hardening — while `nixos-rebuild` stayed green.
+  #
+  # Asserted in both directions, which is what makes it a merge rather than an
+  # accidental swap: the override's key must APPEAR, and the module's own keys
+  # must all still be there.
+  systemdOverridesMerge =
+    pkgs:
+    let
+      plain = evalSystem pkgs { services.sillytavern-nixos.enable = true; };
+      over = evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          # EXACTLY the form docs/installing.md tells people to use.
+          systemdOverrides.serviceConfig.ReadWritePaths = [ "/var/lib/sillytavern/extra" ];
+        };
+      };
+      plainSc = plain.config.systemd.services.sillytavern.serviceConfig;
+      overSc = over.config.systemd.services.sillytavern.serviceConfig;
+      # Every directive the plain unit sets must survive the override.
+      dropped = builtins.filter (k: !(overSc ? ${k})) (builtins.attrNames plainSc);
+    in
+    assert dropped == [ ];
+    assert overSc ? ReadWritePaths;
+    assert overSc.ReadWritePaths == [ "/var/lib/sillytavern/extra" ];
+    pkgs.runCommand "sillytavern-check-systemd-overrides-merge" { }
+      ''
+        echo "PASS systemd-overrides-merge (plain: ${toString (builtins.length (builtins.attrNames plainSc))} directives, overridden: ${toString (builtins.length (builtins.attrNames overSc))})"
+        touch "$out"
+      '';
+
+  # ── 17. The unit is actually pulled in at boot ─────────────────────────────
+  #
+  # `after = [ "network-online.target" ]` without `wantedBy` gives a unit that
+  # is correctly ORDERED and never STARTED. There is no error for it: the
+  # machine boots, and `systemctl status sillytavern` says "inactive (dead)".
+  wantedByIsSet =
+    pkgs:
+    let
+      system = evalSystem pkgs { services.sillytavern-nixos.enable = true; };
+      wantedBy = system.config.systemd.services.sillytavern.wantedBy;
+    in
+    assert lib.elem "multi-user.target" wantedBy;
+    pkgs.runCommand "sillytavern-check-wantedby" { }
+      ''
+        echo "PASS wantedby (${lib.concatStringsSep " " wantedBy})"
+        touch "$out"
+      '';
+
+  # ── 18. Per-file `policy` / `mode` reach the seeder ─────────────────────────
+  #
+  # `scripts/st_seed_files.py` has implemented and tested `policy_for` /
+  # `mode_for` for the whole life of this project, and the Nix option declared
+  # neither — so they were unreachable and the one-file-overrides-the-global
+  # use case could not be expressed at all.
+  #
+  # Also pins the "unset means absent" contract: an entry that declares neither
+  # must NOT carry a `policy: null` into the spec, so the rendered bytes do not
+  # change for everyone who never opts in.
+  perFilePolicyAndMode =
+    pkgs:
+    let
+      system = evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          files = {
+            common = {
+              "themes/plain.json" = { json = { a = 1; }; };
+              "themes/locked.json" = { json = { b = 2; }; };
+            };
+            byUser.seanc = {
+              "themes/authoritative.json" = {
+                json = { c = 3; };
+                policy = "overwrite";
+                mode = "0644";
+              };
+            };
+          };
+        };
+      };
+      files = system.config.services.sillytavern-nixos.internal.seedSpecJson.users.seanc.files;
+      plain = files."themes/plain.json";
+      locked = files."themes/locked.json";
+      mine = files."themes/authoritative.json";
+    in
+    # Unset knobs stay OUT of the spec rather than riding along as nulls.
+    assert !(plain ? policy);
+    assert !(plain ? mode);
+    assert !(locked ? policy);
+    assert !(locked ? mode);
+    # A per-user override lands verbatim.
+    assert mine.policy == "overwrite";
+    assert mine.mode == "0644";
+    pkgs.runCommand "sillytavern-check-per-file-policy-mode" { }
+      ''
+        echo "PASS per-file-policy-mode"
+        touch "$out"
+      '';
+
+  # ── 19. Reserved paths and bad modes are caught at EVAL time ───────────────
+  #
+  # Both used to fail only at ACTIVATION, from the unit's `preStart`, which
+  # means the seeder exits non-zero, `ExecStartPre` fails and THE SERVICE DOES
+  # NOT START — after a green `nixos-rebuild`, with the entries visited before
+  # the bad one already written.
+  #
+  # Each case asserts the assertion FIRES; the mirror-image case (a legal path
+  # and a legal mode must NOT trip anything) stops this from being satisfied by
+  # an assertion that is simply always false.
+  reservedPathsAsserted =
+    pkgs:
+    let
+      nFailures =
+        block:
+        builtins.length (
+          builtins.filter (a: !a.assertion)
+            (evalSystem pkgs {
+              services.sillytavern-nixos = {
+                enable = true;
+                config.enableUserAccounts = true;
+                users.seanc.passwordFile = pkgs.writeText "pw" "not-a-real-password";
+                files.byUser.seanc = block;
+              };
+            }).config.assertions
+        );
+      # These all pass the seeder's deny-list.
+      refused = {
+        "backups/x.json" = { json = { }; };
+        "_cache/model.json" = { json = { }; };
+        "_webpack/lib.json" = { json = { }; };
+        "_storage/blob" = { json = { }; };
+        "stats.json" = { json = { }; };
+        "config.yaml" = { json = { }; };
+      };
+      # Legal, and must trip NOTHING.
+      legal = {
+        "themes/ok.json" = { json = { }; policy = "overwrite"; mode = "0644"; };
+        "worlds/book.json" = { json = { }; };
+        # `backups` is only reserved at the TOP level of the account dir.
+        "user/backups/ok.json" = { json = { }; };
+      };
+      badModes = {
+        "themes/a.json" = { json = { }; mode = "644"; };
+        "themes/b.json" = { json = { }; mode = "8888"; };
+        "themes/c.json" = { json = { }; mode = "06444"; };
+      };
+      # The deny-list is ONE assertion covering every entry, not one assertion
+      # per entry, so `nFailures` counts ASSERTIONS. Each reserved path is
+      # therefore exercised ON ITS OWN: if they were passed together, a single
+      # assertion firing once would look identical to all six being caught.
+      missed = builtins.filter (rel: nFailures { ${rel} = refused.${rel}; } < 1) (
+        builtins.attrNames refused
+      );
+      missedModes = builtins.filter (rel: nFailures { ${rel} = badModes.${rel}; } < 1) (
+        builtins.attrNames badModes
+      );
+    in
+    assert missed == [ ];
+    assert missedModes == [ ];
+    # …and the legal set must trip nothing at all, or the checks above would be
+    # satisfiable by an assertion that is simply always false.
+    assert nFailures legal == 0;
+    pkgs.runCommand "sillytavern-check-reserved-paths" { }
+      ''
+        echo "PASS reserved-paths-asserted"
+        touch "$out"
+      '';
+
+  # ── 20. `files.byUser` does not break evaluation ───────────────────────────
+  #
+  # The one that mattered most. `config.assertions` is reached by
+  # `system.build.toplevel`, which is what `nixos-rebuild switch` builds, so a
+  # broken assertion expression was not a latent test gap — it made the
+  # per-account seeding feature unusable in anger:
+  #
+  #   error: expected a list but found a set: { "themes/mine.json" = «thunk»; }
+  #
+  # Two expressions were wrong: one passed a list of ATTRSETS to
+  # `lib.concatLists`, and two more called `lib.mapAttrs lib.attrNames`, where
+  # `mapAttrs` invokes its function as `f name value` and `attrNames` is
+  # arity-1, so it received the HANDLE NAME and died with
+  # `expected a set but found a string: "seanc"`.
+  #
+  # Nothing in the suite set `files.byUser`, so it was never forced.
+  #
+  # Asserted on `system.build.toplevel` specifically, not on some convenient
+  # leaf, because "does the whole system evaluate" is the actual contract.
+  filesByUserEvaluates =
+    pkgs:
+    let
+      system = evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          config.enableUserAccounts = true;
+          users.seanc.passwordFile = pkgs.writeText "pw" "not-a-real-password";
+          files.byUser.seanc = {
+            "themes/Azure.json".json = { palette.accent = "#ff0000"; };
+            "settings.json".json = { main_api = "custom"; };
+          };
+        };
+      };
+      drvPath = system.config.system.build.toplevel.drvPath;
+    in
+    assert builtins.isString drvPath;
+    pkgs.runCommand "sillytavern-check-files-by-user-evaluates" { }
+      ''
+        echo "PASS files-by-user-evaluates"
+        touch "$out"
+      '';
+
+  # ── 20a. settings/files merge DEEPLY, not shallowly ─────────────────────────
+  #
+  # This merges `settings.common` with `settings.byUser.<handle>` (and
+  # `files.common` with `files.byUser.<handle>`). The merge MUST be deep: a
+  # per-account override of one leaf has to leave the sibling keys the account
+  # did not restate intact.
+  #
+  # It used to be `//`, which is SHALLOW: it replaced the whole subtree, so
+  # overriding `oai_settings.openai_max_context` silently deleted
+  # `oai_settings.custom_url` from the account's settings.json. The option's
+  # description and docs/options.md both promised a deep merge; the code did
+  # not do one. This check is what makes the promise true and keeps it true.
+  #
+  # It asserts on the RENDERED seed spec, so it covers the whole path: the Nix
+  # merge, the option types, and the JSON that the seeder will write to disk.
+  settingsDeepMerge =
+    pkgs:
+    let
+      system = evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          config.enableUserAccounts = true;
+          users.seanc.passwordFile = pkgs.writeText "pw" "not-a-real-password";
+          settings = {
+            common.oai_settings = {
+              openai_max_context = 100;
+              custom_url = "https://common.example.com";
+            };
+            common.power_user.font_scale = 1.2;
+            byUser.seanc.oai_settings.openai_max_context = 200;
+          };
+        };
+      };
+      merged = system.config.services.sillytavern-nixos.internal.seedSpecJson.users.seanc.settings;
+
+      # A sibling key the account did NOT override must survive.
+      siblingSurvived = merged.oai_settings ? custom_url;
+      # The overridden leaf must take the account's value.
+      leafOverrode = merged.oai_settings.openai_max_context == 200;
+      # A whole subtree the account never mentioned must survive untouched.
+      otherSubtreeSurvived = merged.power_user.font_scale == 1.2;
+    in
+    assert siblingSurvived && leafOverrode && otherSubtreeSurvived;
+    pkgs.runCommand "sillytavern-check-settings-deep-merge" { }
+      ''
+        echo "PASS settings-deep-merge"
+        touch "$out"
+      '';
+
+  # ── 21b. settingsExtra lands in every account's settings.json ──────────────
+  settingsExtraRendered =
+    pkgs:
+    let
+      system = evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          config.enableUserAccounts = true;
+          users.seanc.passwordFile = pkgs.writeText "pw" "not-a-real-password";
+          settingsExtra = {
+            mainApi = "kobold";
+            maxContext = 8192;
+            background.url = "https://example.com/bg.png";
+            swipes = false;
+            username = "Seanc";
+            proxies = [
+              { name = "Corp"; url = "http://proxy:8080"; password = "secret"; }
+            ];
+            selectedProxy = 1;
+            extensionSettings.disabledExtensions = [ "caption" ];
+          };
+        };
+      };
+      s = system.config.services.sillytavern-nixos.internal.seedSpecJson.users.seanc.settings;
+    in
+    assert s.main_api == "kobold";
+    assert s.max_context == 8192;
+    assert s.background.url == "https://example.com/bg.png";
+    assert s.swipes == false;
+    assert s.username == "Seanc";
+    assert s.proxies == [ { name = "Corp"; url = "http://proxy:8080"; password = "secret"; } ];
+    assert s.selected_proxy == 1;
+    assert s.extension_settings.disabledExtensions == [ "caption" ];
+    # defaults present when unset
+    assert s.background.fitting == "cover";
+    pkgs.runCommand "sillytavern-check-settings-extra" { }
+      ''
+        echo "PASS settings-extra"
+        touch "$out"
+      '';
+
+  # ── 21c. settingsExtra deep-merges with settings.common ───────────────────
+  settingsExtraMergeOrder =
+    pkgs:
+    let
+      system = evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          config.enableUserAccounts = true;
+          users.seanc.passwordFile = pkgs.writeText "pw" "not-a-real-password";
+          settingsExtra.mainApi = "kobold";
+          settings.common.main_api = "openai";
+        };
+      };
+      s = system.config.services.sillytavern-nixos.internal.seedSpecJson.users.seanc.settings;
+    in
+    # settings.common wins over settingsExtra defaults (common is merged later)
+    assert s.main_api == "openai";
+    pkgs.runCommand "sillytavern-check-settings-extra-merge" { }
+      ''
+        echo "PASS settings-extra-merge"
+        touch "$out"
+      '';
+
+  # ── 21. The hardening block is PINNED ──────────────────────────────────────
+  #
+  # `moduleEvaluates` pins exactly ONE of the ~26 hardening directives
+  # (`ProtectSystem`), and nothing in the suite mentions `NoNewPrivileges`,
+  # `SystemCallFilter`, `CapabilityBoundingSet`, `RestrictAddressFamilies`,
+  # `MemoryDenyWriteExecute`, `ProtectHome` and the rest. Deleting or loosening
+  # any of them is therefore invisible.
+  #
+  # That is a real exposure rather than a theoretical one: this unit runs a
+  # Node server that parses attacker-controlled JSON and renders user-supplied
+  # HTML, serving it out of a read-only store path.
+  #
+  # Asserted on the `serviceConfig` ATTRSET rather than by grepping the rendered
+  # unit, which is strictly stronger: NixOS renders these attribute names
+  # verbatim into the unit file (`memoryMax` would become an unknown directive
+  # and be ignored — see the note in modules/services.nix), so the attribute
+  # name IS the directive, and asserting the VALUE catches a directive that was
+  # kept but weakened.
   # ── Extracting the option surface from upstream's own default/config.yaml ──
   #
   # Used by the `libHelpers` check to generate its cases from the real
@@ -1249,15 +1960,564 @@ rec {
         touch $out
       '';
 
+  # ── 24. The settings-key guard knows real settings from imaginary ones ────
+  #
+  # `settings.json` is read by direct property access, so a key that upstream
+  # does not have is inert — written to disk, never read, no warning. The guard
+  # in modules/assertions.nix refuses those keys, using the inventory derived
+  # from upstream's own sources (lib/settings-inventory.json).
+  #
+  # A guard that refuses everything is as useless as no guard, so BOTH
+  # directions are asserted here:
+  #
+  #   1. a rich, REAL settings configuration must produce NO failure — several
+  #      subtrees, a free-form map, a nested upstream object, a per-account
+  #      override, and the top-level keys the client writes;
+  #   2. a typo must produce exactly one failure that NAMES the path.
+  #
+  # Direction 1 is the one that catches a false positive, which is the failure
+  # mode a key checker is most likely to have: upstream's field names are
+  # snake_case with a few camelCase exceptions, and a checker that normalised
+  # them would reject the real thing.
+  settingsKeysKnown =
+    pkgs:
+    let
+      auth = {
+        enable = true;
+        config.enableUserAccounts = true;
+        users.seanc.passwordFile = pkgs.writeText "pw" "not-a-real-password";
+      };
+
+      # Every field below exists upstream, at the pinned version. The names are
+      # taken from lib/settings-inventory.json, which is derived from the
+      # source — this list is a SAMPLE of it, not a copy.
+      valid = evalSystem pkgs {
+        services.sillytavern-nixos = auth // {
+          settings = {
+            common = {
+              main_api = "openai";
+              username = "seanc";
+              max_context = 32768;
+              oai_settings = {
+                custom_url = "https://llm.example.com/v1";
+                openai_max_context = 32768;
+                temp_openai = 0.7;
+                stream_openai = true;
+              };
+              power_user = {
+                font_scale = 1.2;
+                fast_ui_mode = false;
+                chat_width = 60;
+                # A free-form map: keyed by persona name, so ANY key is legal.
+                personas.Alice = "A description.";
+                # A nested upstream object, set as a whole.
+                instruct.preset = "Alpaca";
+              };
+              world_info_settings = {
+                world_info_depth = 4;
+                world_info_recursive = true;
+              };
+              extension_settings = {
+                caption.enabled = true;
+              };
+              tags = [ "tag" ];
+            };
+            byUser.seanc.oai_settings.openai_max_context = 65536;
+          };
+        };
+      };
+
+      # The guard's own message, so the check asserts on THIS guard and not on
+      # some other assertion that happens to fire.
+      guardPattern = ".*not settings SillyTavern has.*";
+      validFailures = ourFailuresMatching valid.config guardPattern;
+
+      typo = evalSystem pkgs {
+        services.sillytavern-nixos = auth // {
+          settings.common.power_user.font_scal = 1.2;
+        };
+      };
+      typoFailures = ourFailuresMatching typo.config guardPattern;
+      typoNames = lib.any (e: builtins.match ".*font_scal.*" e.message != null) typoFailures;
+
+      # A key outside the client's save payload is a DIFFERENT failure: the
+      # browser deletes it at the next save.
+      strayPattern = ".*the browser DISCARDS them.*";
+      stray = evalSystem pkgs {
+        services.sillytavern-nixos = auth // {
+          settings.common.my_own_key = 1;
+        };
+      };
+      strayFailures = ourFailuresMatching stray.config strayPattern;
+
+      # And a value of the WRONG KIND is a third failure. In JavaScript a
+      # non-empty string is TRUE, so `waifuMode = "false"` would leave the
+      # setting ON while the configuration says OFF — silently.
+      typePattern = ".*not the type upstream expects.*";
+      mistyped = evalSystem pkgs {
+        services.sillytavern-nixos = auth // {
+          settings.common.power_user.waifuMode = "false";
+        };
+      };
+      mistypedFailures = ourFailuresMatching mistyped.config typePattern;
+    in
+    assert validFailures == [ ];
+    assert builtins.length typoFailures == 1;
+    assert typoNames;
+    assert builtins.length strayFailures == 1;
+    assert builtins.length mistypedFailures == 1;
+    pkgs.runCommand "sillytavern-check-settings-keys-known" { }
+      ''
+        echo "PASS settings-keys-known (real settings accepted; typo, stray key and mistyped value all refused)"
+        touch "$out"
+      '';
+
+  # ── 24b. The typed settings tree covers every setting upstream has ───────
+  #
+  # `settingsExtra.powerUser` and its six siblings are a TYPED mirror of the
+  # `settings.json` subtrees: one option per setting, with upstream's own
+  # name, the right type, and upstream's default in the description.
+  #
+  # The tree is generated from `lib/settings-inventory.json`, so it cannot
+  # drift from upstream by hand — but "generated" is a claim, and this check
+  # is the measurement: it sets EVERY field in the inventory to a value of the
+  # right type, and asserts that the rendered `settings.json` then contains
+  # exactly those paths, and nothing else.
+  #
+  # That covers three things at once:
+  #   * every setting upstream has is settable (the tree is complete);
+  #   * no setting that upstream does not have is settable (the tree is
+  #     exactly the inventory, no more);
+  #   * the types are right — a field whose type did not match would fail the
+  #     option's own type check, and a field that is missing from the tree
+  #     would fail the "does not exist" check.
+  settingsTypedTree =
+    pkgs:
+    let
+      inventory = builtins.fromJSON (builtins.readFile ../lib/settings-inventory.json);
+
+      # A value of the right type for a field.
+      sampleValue =
+        field:
+        if field.type == "bool" then
+          true
+        else if field.type == "int" then
+          1
+        else if field.type == "float" then
+          1.5
+        else if field.type == "array" then
+          [ ]
+        else
+          # `unknown` (an upstream constant) and `null` are `anything`.
+          "s";
+
+      # A nested attrset from dotted paths.
+      insert =
+        attrs: path: value:
+        let
+          parts = lib.splitString "." path;
+          name = lib.head parts;
+          rest = lib.tail parts;
+        in
+        if rest == [ ] then
+          attrs // { ${name} = value; }
+        else
+          attrs // {
+            ${name} = insert (attrs.${name} or { }) (lib.concatStringsSep "." rest) value;
+          };
+
+      sampleFor =
+        surface:
+        lib.foldl' (acc: field: insert acc field.path (sampleValue field)) { }
+          inventory.surfaces.${surface}.fields;
+
+      # The leaf paths of a rendered JSON object, as dotted strings.
+      pathsOf =
+        attrs:
+        lib.concatMap
+          (name:
+            let
+              value = attrs.${name};
+            in
+            if lib.isAttrs value then
+              map (p: "${name}.${p}") (pathsOf value)
+            else
+              [ name ])
+          (lib.attrNames attrs);
+
+      system = evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          config.enableUserAccounts = true;
+          users.seanc.passwordFile = pkgs.writeText "pw" "not-a-real-password";
+          settingsExtra = {
+            powerUser = sampleFor "power_user";
+            oaiSettings = sampleFor "oai_settings";
+            textGenerationSettings = sampleFor "textgenerationwebui_settings";
+            naiSettings = sampleFor "nai_settings";
+            kaiSettings = sampleFor "kai_settings";
+            hordeSettings = sampleFor "horde_settings";
+            worldInfoSettings = sampleFor "world_info_settings";
+          };
+        };
+      };
+      rendered = system.config.services.sillytavern-nixos.internal.seedSpecJson.users."default-user".settings;
+
+      # The JSON key a typed option lands under is the SURFACE NAME itself —
+      # `powerUser` is the Nix option, `power_user` is what lands in
+      # `settings.json`. Getting that backwards makes the check compare the
+      # rendered tree against an empty one, which "passes" for the wrong
+      # reason.
+      expected =
+        lib.mapAttrs (
+          surface: fields: lib.map (field: field.path) fields.fields
+        ) inventory.surfaces;
+
+      actual = lib.mapAttrs (surface: _: pathsOf (rendered.${surface} or { })) inventory.surfaces;
+
+      # `builtins.sort` takes a COMPARATOR first — `lib.sort` is that
+      # built-in, not a one-argument convenience.
+      mismatched = lib.filterAttrs (
+        surface: paths: builtins.sort (a: b: a < b) paths
+        != builtins.sort (a: b: a < b) (expected.${surface} or [ ])
+      ) actual;
+    in
+    assert mismatched == { };
+    # And nothing null survived the prune: a null in `settings.json` would
+    # OVERRIDE upstream's own default with null, which is the opposite of
+    # what "not declared" is supposed to mean.
+    assert lib.all (value: value != null) (lib.concatLists (lib.attrValues actual));
+    pkgs.runCommand "sillytavern-check-settings-typed-tree" { }
+      ''
+        echo "PASS settings-typed-tree (every upstream setting is settable, and nothing else is)"
+        touch "$out"
+      '';
+
+  # ── 24c. A typo in the typed tree is refused ──────────────────────────────
+  #
+  # The point of the tree is that a mistake is LOUD. The module system says
+  # "The option `…font_scal' does not exist. Did you mean `…font_scale'?" —
+  # which is exactly the error a person wants at `nixos-rebuild` time rather
+  # than a setting that quietly does nothing.
+  #
+  # `builtins.tryEval` cannot report the message, so this asserts the part
+  # that matters: the evaluation FAILS. A tree that accepted the typo would
+  # evaluate cleanly, and this check would go red.
+  settingsTypedTreeRefusesTypos =
+    pkgs:
+    let
+      tree = import ../lib/settings-tree.nix {
+        inherit lib;
+        inventory = builtins.fromJSON (builtins.readFile ../lib/settings-inventory.json);
+      };
+
+      # A module system with ONE option, typed with the tree's own type.
+      #
+      # The whole NixOS system is not needed to test this: what is under test
+      # is the TYPE, and the type is the same object the module uses. Building
+      # a full system here would add a minute of evaluation to prove the same
+      # thing — and, as it turns out, would hide it: the unmatched-definition
+      # check in `nixosSystem` is eager, so the error escapes `tryEval`
+      # instead of being caught by it.
+      typed =
+        value:
+        lib.evalModules {
+          modules = [
+            (
+              { lib, ... }:
+              {
+                options.typed = lib.mkOption {
+                  type = tree.surfaceType "power_user";
+                  default = { };
+                };
+              }
+            )
+            { typed = value; }
+          ];
+        };
+
+      # The parentheses around the WHOLE expression matter: `tryEval (f x).y`
+      # applies `.y` to tryEval's RESULT, so the evaluation that throws
+      # happens outside the tryEval and the error escapes it.
+      forces = value: builtins.tryEval ((typed value).config.typed);
+
+      good = forces { font_scale = 1.2; };
+      typo = forces { font_scal = 1.2; };
+
+      # The WRONG TYPE is a different beast: a type error inside a submodule
+      # is raised while that submodule's own fixpoint is computed, which is
+      # eager — so `builtins.tryEval` cannot catch it and it escapes as a
+      # hard error. (An unknown option CAN be caught: that check is a `seq`
+      # on the config, so it stays lazy.) The type mapping is therefore
+      # asserted directly, through the tree's own type for that path.
+      numberType = tree.typeOfPath "power_user" "font_scale";
+      stringType = tree.typeOfPath "oai_settings" "custom_url";
+      boolType = tree.typeOfPath "power_user" "waifuMode";
+    in
+    assert good.success;
+    assert !typo.success;
+    # A number accepts a number and refuses a string; a string accepts a
+    # string and refuses a number; a boolean accepts only a boolean.
+    assert numberType.check 1.2;
+    assert numberType.check 1;
+    assert !numberType.check "big";
+    assert stringType.check "https://llm.example.com/v1";
+    assert !stringType.check 123;
+    assert boolType.check true;
+    assert !boolType.check "false";
+    pkgs.runCommand "sillytavern-check-settings-typed-tree-refuses-typos" { }
+      ''
+        echo "PASS settings-typed-tree-refuses-typos (unknown field refused; types checked)"
+        touch "$out"
+      '';
+
+  # ── 25. The settings inventory matches the source it was derived from ─────
+  #
+  # lib/settings-inventory.json is what the settings-key guard reasons about.
+  # If it goes stale, the guard starts refusing settings that upstream added
+  # (or accepting ones it removed) — and it would do so quietly, because the
+  # guard itself would still be "working".
+  #
+  # So the inventory is regenerated from the source and compared, in the build,
+  # by the same script that produced it. A mismatch fails the build with the
+  # command to fix it.
+  settingsInventoryFresh =
+    pkgs:
+    pkgs.runCommand "sillytavern-check-settings-inventory-fresh"
+      {
+        nativeBuildInputs = [ pkgs.nodejs ];
+      }
+      ''
+        # The generator resolves the repository root from its own location, so
+        # the layout has to be reproduced rather than flattened.
+        mkdir -p scripts public default lib
+        # Explicit target name: a store path's basename is hash-prefixed
+        # (`<hash>-extract_settings_inventory.mjs`), so `cp src scripts/`
+        # would land the file under that name and node would not find it.
+        cp ${../scripts/extract_settings_inventory.mjs} scripts/extract_settings_inventory.mjs
+        # `/.` — copying the directory itself would nest it (`public/public`),
+        # because the target directory already exists.
+        cp -r ${../public}/. public/
+        cp -r ${../default}/. default/
+        cp ${../lib/settings-inventory.json} lib/settings-inventory.json
+
+        node scripts/extract_settings_inventory.mjs --check
+        touch "$out"
+      '';
+
+  # ── presetsMatchUpstream — the named-profile buckets are upstream's ───────
+  #
+  # The `presets` option group is a set of claims about upstream: that the
+  # Text Completion presets live in a directory called "TextGen Settings", that
+  # the API id `textgenerationwebui` reads them, and so on.
+  #
+  # Every one of those claims is a DIRECTORY NAME, and a wrong one is
+  # silent: the seeder writes the file, the account's directory is created,
+  # and the server simply never shows it in the dropdown. There is no error
+  # anywhere, and the only symptom is a preset that does not appear.
+  #
+  # So the claims are checked against upstream's own source rather than
+  # trusted: `scripts/extract_preset_directories.mjs` reads
+  # `USER_DIRECTORY_TEMPLATE` out of `src/constants.js` and the API id ->
+  # directory switch out of `src/endpoints/presets.js`, and this check
+  # compares that with the module's own table in `lib/default.nix`.
+  #
+  # An upstream rename fails the build instead of quietly emptying a
+  # dropdown.
+  presetsMatchUpstream =
+    pkgs:
+    pkgs.runCommand "sillytavern-check-presets-match-upstream"
+      {
+        nativeBuildInputs = [ pkgs.nodejs ];
+      }
+      ''
+        # The generator resolves the repository root from its own location, so
+        # the layout has to be reproduced rather than flattened.
+        mkdir -p scripts src/endpoints src public/scripts/extensions/quick-reply/src
+
+        # Explicit target name: a store path's basename is hash-prefixed
+        # (`<hash>-extract_preset_directories.mjs`), so `cp src scripts/`
+        # would land the file under that name and node would not find it.
+        cp ${../scripts/extract_preset_directories.mjs} scripts/extract_preset_directories.mjs
+
+        # The upstream files the generator reads.
+        cp ${../src/constants.js} src/constants.js
+        cp ${../src/endpoints/presets.js} src/endpoints/presets.js
+        cp ${../public/scripts/preset-manager.js} public/scripts/preset-manager.js
+        cp ${../public/scripts/power-user.js} public/scripts/power-user.js
+        cp ${../public/scripts/extensions/quick-reply/src/QuickReplySet.js} public/scripts/extensions/quick-reply/src/QuickReplySet.js
+
+        # What the module believes, rendered from `lib/default.nix`.
+        cat > expected.json <<'EOF'
+        ${builtins.toJSON st.presetFacts}
+        EOF
+
+        node scripts/extract_preset_directories.mjs --check expected.json
+        touch "$out"
+      '';
+
+  # ── presetsRendered — the named-profile layer reaches the data root ───────
+  #
+  # `presets` is a layer over `files`: a bucket and a name become a path, and
+  # for the buckets whose dropdown label comes from inside the JSON, a `name`
+  # field is filled in.
+  #
+  # Both halves are easy to get subtly wrong, and both are silent:
+  #
+  #   * A path that is one directory off produces a file the server never
+  #     reads, and the dropdown is simply empty.
+  #   * A missing `name` produces a preset that appears in the dropdown as
+  #     "undefined".
+  #
+  # So the rendered seed spec is compared against the expected paths and the
+  # expected content, here.
+  presetsRendered =
+    pkgs:
+    let
+      spec = (evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          config.enableUserAccounts = true;
+          presets.common = {
+            # A label-from-content bucket: the `name` is injected.
+            instruct."Alpaca".json = {
+              identifier = "alpaca";
+              content = "IN";
+            };
+            themes."Azure".json = {
+              blur_strength = 11;
+            };
+            # A label-from-file bucket: the `name` must NOT be injected, or
+            # the file would carry a field upstream does not put there.
+            textGeneration."Fast".json = {
+              temperature = 0.9;
+            };
+            worlds."Lore".json = {
+              entries = { };
+            };
+          };
+          presets.byUser.seanc = {
+            sysprompt."Roleplay".json = {
+              content = "Write {{char}} as {{user}} would.";
+            };
+          };
+        };
+      }).config.services.sillytavern-nixos.internal.seedSpecJson;
+
+      commonFiles = spec.users."default-user".files;
+      userFiles = spec.users.seanc.files;
+
+      expectedCommonPaths = [
+        "TextGen Settings/Fast.json"
+        "instruct/Alpaca.json"
+        "themes/Azure.json"
+        "worlds/Lore.json"
+      ];
+      actualCommonPaths = builtins.attrNames commonFiles;
+
+      # The `name` field, present exactly where the label comes from the
+      # content and absent where it comes from the file name.
+      injectsName = builtins.attrNames (
+        lib.filterAttrs (_: entry: entry.json != null && (entry.json ? name)) commonFiles
+      );
+      expectedInjectsName = [
+        "instruct/Alpaca.json"
+        "themes/Azure.json"
+      ];
+    in
+    assert lib.sort (a: b: a < b) actualCommonPaths == lib.sort (a: b: a < b) expectedCommonPaths;
+    assert lib.sort (a: b: a < b) injectsName == lib.sort (a: b: a < b) expectedInjectsName;
+    # The per-account override REACHES that account, on top of the common
+    # ones — `presets.common` applies to every account, exactly as
+    # `files.common` does.
+    assert lib.sort (a: b: a < b) (builtins.attrNames userFiles)
+      == lib.sort (a: b: a < b) (expectedCommonPaths ++ [ "sysprompt/Roleplay.json" ]);
+    assert commonFiles."instruct/Alpaca.json".json.name == "Alpaca";
+    assert commonFiles."themes/Azure.json".json.name == "Azure";
+    assert !(commonFiles."TextGen Settings/Fast.json".json ? name);
+    pkgs.runCommand "sillytavern-check-presets-rendered" { }
+      ''
+        echo "PASS presets-rendered (${toString (builtins.length expectedCommonPaths)} paths, name injected where the label comes from the content)"
+        touch "$out"
+      '';
+
+  hardeningPinned =
+    pkgs:
+    let
+      system = evalSystem pkgs { services.sillytavern-nixos.enable = true; };
+      sc = system.config.systemd.services.sillytavern.serviceConfig;
+
+      # directive -> the exact value that must be set. Anything not listed here
+      # is not pinned, which is the honest state of the block.
+      expected = {
+        # Filesystem
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        PrivateTmp = true;
+        PrivateDevices = true;
+        # Processes
+        ProtectProc = "invisible";
+        ProcSubset = "pid";
+        ProtectClock = true;
+        ProtectHostname = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectKernelLogs = true;
+        ProtectControlGroups = true;
+        NoNewPrivileges = true;
+        LockPersonality = true;
+        MemoryDenyWriteExecute = true;
+        # Capabilities
+        RestrictSUIDSGID = true;
+        RestrictRealtime = true;
+        RestrictNamespaces = true;
+        SystemCallArchitectures = "native";
+        # Syscalls
+        SystemCallErrorNumber = "EPERM";
+        # Empty on purpose: the jimp image pipeline is pure JS, so no capability
+        # is needed for anything this server does.
+        CapabilityBoundingSet = [ ];
+        AmbientCapabilities = [ ];
+        # Only the three a networked Node process needs — no Bluetooth, no
+        # packet sockets, no netlink.
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+        # `@system-service` minus the privileged and resources groups.
+        SystemCallFilter = [ "@system-service" "~@privileged" "~@resources" ];
+      };
+
+      # Normalised because `unitOption.merge` CONCATENATES list-valued
+      # definitions (`attrsOf unitOption` wraps each in `concatMap`), so a single
+      # definition of `[ ]` reads back as `[ [ ] ]`. Flattening both sides makes
+      # the comparison uniform across scalars and lists.
+      flat =
+        x:
+        if builtins.isList x && x != [ ] && builtins.isList (builtins.head x) then
+          lib.concatLists x
+        else
+          x;
+
+      missing = builtins.filter (k: !(sc ? ${k})) (builtins.attrNames expected);
+      wrong = builtins.filter (k: flat sc.${k} != flat expected.${k}) (builtins.attrNames expected);
+    in
+    # An eval-time failure naming every offender, rather than a shell one.
+    assert missing == [ ];
+    assert wrong == [ ];
+    pkgs.runCommand "sillytavern-check-hardening-pinned" { }
+      ''
+        echo "PASS hardening-pinned (${toString (builtins.length (builtins.attrNames expected))} directives)"
+        touch "$out"
+      '';
+
   checks =
     pkgs:
     {
+      packageIdentity = packageIdentity pkgs;
       moduleEvaluates = moduleEvaluates pkgs;
       configYamlRoundTrip = configYamlRoundTrip pkgs;
       browserLaunchDisabled = browserLaunchDisabled pkgs;
       publicDirectoriesPresent = publicDirectoriesPresent pkgs;
       secretsExcluded = secretsExcluded pkgs;
-      assertionsAreWired = assertionsAreWired pkgs;
+      guardsFire = guardsFire pkgs;
       seedSpecCoversCommon = seedSpecCoversCommon pkgs;
       customCssIsolated = customCssIsolated pkgs;
       errorPagesIsolated = errorPagesIsolated pkgs;
@@ -1266,8 +2526,23 @@ rec {
       upstreamCollisionAsserted = upstreamCollisionAsserted pkgs;
       assertionsDisabledCleanly = assertionsDisabledCleanly pkgs;
       noCrossModuleReads = noCrossModuleReads pkgs;
-      libHelpers = libHelpers pkgs;
       seeder = seeder pkgs;
+      systemdOverridesMerge = systemdOverridesMerge pkgs;
+      wantedByIsSet = wantedByIsSet pkgs;
+      perFilePolicyAndMode = perFilePolicyAndMode pkgs;
+      reservedPathsAsserted = reservedPathsAsserted pkgs;
+      filesByUserEvaluates = filesByUserEvaluates pkgs;
+      settingsDeepMerge = settingsDeepMerge pkgs;
+      settingsExtraRendered = settingsExtraRendered pkgs;
+      settingsExtraMergeOrder = settingsExtraMergeOrder pkgs;
+      settingsKeysKnown = settingsKeysKnown pkgs;
+      settingsTypedTree = settingsTypedTree pkgs;
+      settingsTypedTreeRefusesTypos = settingsTypedTreeRefusesTypos pkgs;
+      settingsInventoryFresh = settingsInventoryFresh pkgs;
+      presetsMatchUpstream = presetsMatchUpstream pkgs;
+      presetsRendered = presetsRendered pkgs;
+      hardeningPinned = hardeningPinned pkgs;
+      libHelpers = libHelpers pkgs;
     };
 
   packages = pkgs: { };

@@ -59,6 +59,16 @@ let
     types
     ;
 
+  # The typed option tree for the `settings.json` UI surfaces.
+  #
+  # Built from `lib/settings-inventory.json`, which is DERIVED from upstream's
+  # own source by `scripts/extract_settings_inventory.mjs` — so the option
+  # tree and the settings-key guard are the same knowledge, not two lists.
+  settingsTree = import ../lib/settings-tree.nix {
+    inherit lib;
+    inventory = builtins.fromJSON (builtins.readFile ../lib/settings-inventory.json);
+  };
+
   # ── Shared submodules ───────────────────────────────────────────────────────
 
   # `thumbnails.dimensions.<kind>` is `[ width, height ]` — a TWO-ELEMENT LIST,
@@ -146,12 +156,480 @@ let
         default = null;
         example = literalExpression ''[ { identifier = "deepseek"; name = "DeepSeek"; } ]'';
         description = "A JSON value written verbatim. Objects, arrays and scalars are all accepted.";
-      };
-      path = mkOption {
+      };      path = mkOption {
         type = types.nullOr types.path;
         default = null;
         example = literalExpression "./my-theme.json";
-        description = "A file copied verbatim from the store. Use this for presets too large to inline.";
+        description = ''
+          A file copied verbatim from the store. Use this for presets too large
+          to inline.
+
+          May also be a DIRECTORY, in which case the tree is copied whole —
+          which is the only way to seed a per-account UI extension, since
+          `extensions/<name>/` is a directory of JS plus a `manifest.json`
+          rather than a single file:
+
+            files.byUser.seanc."extensions/my-ext".path = ./my-ext/;
+
+          An existing target directory is left entirely alone under
+          `seedPolicy = "missing"`, so an extension the user edited through the
+          UI is theirs. Under `"overwrite"` the tree is re-copied file by file,
+          but files the source no longer contains are NOT deleted: this is a
+          seed, not a sync.
+        '';
+      };
+      policy = mkOption {
+        type = types.nullOr (types.enum [ "missing" "overwrite" ]);
+        default = null;
+        example = "overwrite";
+        description = ''
+          Overrides `seedPolicy` for this one file.
+
+          `null` (the default) inherits the global `seedPolicy`.
+
+          Reach for `overwrite` on a file the server would otherwise create for
+          itself, so editing this option keeps taking effect. `customCss` and
+          the four `errorPages` do exactly this: content seeding copies a
+          placeholder into `_css/user.css` and `_errors/` once and never
+          touches them again, so under `missing` your value would be written
+          once and then frozen, and later edits would silently do nothing.
+
+          Set it per file rather than flipping `seedPolicy` globally when only
+          one entry needs to be authoritative — `overwrite` on a
+          `settings.json` a user edits in the UI would fight them.
+        '';
+      };
+      mode = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "0644";
+        description = ''
+          Octal file mode as a 4-digit STRING, e.g. `"0644"`.
+
+          `null` (the default) is `0600`, owner-only, which is right for
+          `settings.json` and every other seeded JSON — the per-user router
+          authenticates before serving any of it, but a world-readable API key
+          on disk is still a world-readable API key.
+
+          Widen it only for a file the server hands to an UNAUTHENTICATED
+          visitor. That is exactly the `customCss` / `errorPages` case, both of
+          which set `"0644"` here.
+
+          A string, not an integer, because that is what a Nix string literal
+          carries and because `mode = 6440` would otherwise be silently read as
+          DECIMAL 6440 rather than octal. `scripts/st_seed_files.py` rejects a
+          string that is not exactly four octal digits, so this fails loudly
+          rather than chmod-ing something absurd. The same check is repeated at
+          evaluation time in modules/assertions.nix, so a bad value is caught by
+          `nixos-rebuild` instead of at service start.
+        '';
+      };
+    };
+  });
+
+  # ── Named-profile buckets ───────────────────────────────────────────────────
+  #
+  # One option per kind of named, saved item the UI offers in a dropdown.
+  # They all have the same shape — a map from NAME to the item's content — and
+  # they differ only in which per-user directory upstream reads them from and
+  # where the dropdown's LABEL comes from.
+  #
+  # The label is the part that is easy to get wrong, and getting it wrong is
+  # silent: the item appears in the dropdown as "undefined", or two items
+  # collide under one label. So the two cases are spelled out per bucket
+  # rather than left to the reader:
+  #
+  #   * The dropdown label is the FILE NAME — the key you write here.
+  #   * The dropdown label is a `name` field INSIDE the JSON. The module
+  #     fills that field in from the key when it is missing, and refuses a
+  #     value that disagrees with the key.
+  #
+  # The per-bucket facts are not guessed: each one cites the upstream source
+  # that establishes it. `lib/default.nix` carries the directory mapping, and
+  # the same facts are asserted by the `presets` check in `lib/tests.nix`.
+  presetBucket =
+    {
+      directory,
+      labelFrom,
+      example,
+      extra,
+    }:
+    mkOption {
+      type = types.attrsOf jsonFileContent;
+      default = { };
+      example = literalExpression example;
+      description = ''
+        Named items of this kind, keyed by NAME.
+
+        Each is seeded as one JSON file per name, into the account's
+        `${directory}` directory — which is where upstream reads this kind of
+        item from.
+
+        ${labelFrom}
+
+        ${extra}
+
+        The key is the item's name. It becomes the file name, with `.json`
+        appended, so it must not contain a path separator.
+
+        Use `{ json = …; }` for a value written here, or `{ path = …; }` for a
+        file copied from the store — the same two forms `files` uses. The
+        per-entry `policy` and `mode` knobs work here too.
+      '';
+    };
+
+  presetBucketType = types.submodule ({ name, ... }: {
+    options = {
+      textGeneration = presetBucket {
+        directory = "TextGen Settings";
+        labelFrom = ''
+          The dropdown label is the FILE NAME, so the key is what the user
+          sees in the list. Upstream reads these from the directory listing
+          (`src/endpoints/settings.js`, `readPresetsFromDirectory` with
+          `removeFileExtension`).
+        '';
+        extra = ''
+          The Text Completion presets — Settings → AI Response Configuration →
+          "Presets". Each one is a flat set of sampler and generation
+          parameters, and upstream ships a dozen of them
+          (`default/content/presets/textgen/`).
+        '';
+        example = ''
+          {
+            "My Preset" = {
+              json = {
+                temperature = 0.9;
+                top_p = 0.95;
+              };
+            };
+          }
+        '';
+      };
+
+      openai = presetBucket {
+        directory = "OpenAI Settings";
+        labelFrom = ''
+          The dropdown label is the FILE NAME, so the key is what the user
+          sees in the list. Upstream reads these from the directory listing
+          (`src/endpoints/settings.js`, `readPresetsFromDirectory` with
+          `removeFileExtension`).
+        '';
+        extra = ''
+          The AI Response Configuration presets — the ones that carry the
+          model, the custom URL and the sampling parameters for an
+          OpenAI-compatible provider.
+        '';
+        example = ''
+          {
+            "My Preset" = {
+              json = {
+                openai_model = "gpt-5.2";
+                openai_max_context = 131072;
+                stream_openai = true;
+              };
+            };
+          }
+        '';
+      };
+
+      novel = presetBucket {
+        directory = "NovelAI Settings";
+        labelFrom = ''
+          The dropdown label is the FILE NAME, so the key is what the user
+          sees in the list. Upstream reads these from the directory listing
+          (`src/endpoints/settings.js`, `readPresetsFromDirectory` with
+          `removeFileExtension`).
+        '';
+        extra = ''
+          The NovelAI presets — Settings → AI Response Configuration, with
+          NovelAI selected as the backend.
+        '';
+        example = ''
+          {
+            "My Preset" = {
+              json = {
+                temperature = 1.1;
+                repetition_penalty = 2.1;
+              };
+            };
+          }
+        '';
+      };
+
+      kobold = presetBucket {
+        directory = "KoboldAI Settings";
+        labelFrom = ''
+          The dropdown label is the FILE NAME, so the key is what the user
+          sees in the list. Upstream reads these from the directory listing
+          (`src/endpoints/settings.js`, `readPresetsFromDirectory` with
+          `removeFileExtension`).
+        '';
+        extra = ''
+          The KoboldAI Classic presets. `koboldhorde` uses the same
+          directory — `src/endpoints/presets.js` maps both API ids to it.
+        '';
+        example = ''
+          {
+            "My Preset" = {
+              json = {
+                temperature = 0.8;
+                top_k = 40;
+              };
+            };
+          }
+        '';
+      };
+
+      instruct = presetBucket {
+        directory = "instruct";
+        labelFrom = ''
+          The dropdown label is a `name` field INSIDE the JSON, not the file
+          name — `public/scripts/preset-manager.js` computes
+          `preset_names = presets.map(x => x.name)` for this group. The
+          module fills that field in from the key when it is missing, so a
+          preset can never appear as "undefined", and it refuses a value
+          that disagrees with the key.
+        '';
+        extra = ''
+          The Instruct templates — the prompt-format templates that say how
+          the model should be talked to. Upstream calls this group
+          "Advanced Formatting", together with `context`, `sysprompt` and
+          `reasoning`.
+        '';
+        example = ''
+          {
+            "Alpaca" = {
+              json = {
+                identifier = "alpaca";
+                input_sequence = "<|user|>";
+                output_sequence = "<|assistant|>";
+              };
+            };
+          }
+        '';
+      };
+
+      context = presetBucket {
+        directory = "context";
+        labelFrom = ''
+          The dropdown label is a `name` field INSIDE the JSON, not the file
+          name — `public/scripts/preset-manager.js` computes
+          `preset_names = presets.map(x => x.name)` for this group. The
+          module fills that field in from the key when it is missing, so a
+          preset can never appear as "undefined", and it refuses a value
+          that disagrees with the key.
+        '';
+        extra = ''
+          The Context templates — where the story text, the example
+          separator and the chat-start marker are assembled.
+        '';
+        example = ''
+          {
+            "ChatML" = {
+              json = {
+                story_string = "{{trim}}";
+                example_separator = "";
+                chat_start = "<|im_start|>";
+              };
+            };
+          }
+        '';
+      };
+
+      sysprompt = presetBucket {
+        directory = "sysprompt";
+        labelFrom = ''
+          The dropdown label is a `name` field INSIDE the JSON, not the file
+          name — `public/scripts/preset-manager.js` computes
+          `preset_names = presets.map(x => x.name)` for this group. The
+          module fills that field in from the key when it is missing, so a
+          preset can never appear as "undefined", and it refuses a value
+          that disagrees with the key.
+        '';
+        extra = ''
+          The system-prompt templates — Settings → AI Response
+          Configuration → Prompt Manager.
+        '';
+        example = ''
+          {
+            "Roleplay - Detailed" = {
+              json = {
+                content = "Write {{char}} as {{user}} would.";
+                post_history = "";
+              };
+            };
+          }
+        '';
+      };
+
+      reasoning = presetBucket {
+        directory = "reasoning";
+        labelFrom = ''
+          The dropdown label is a `name` field INSIDE the JSON, not the file
+          name — `public/scripts/preset-manager.js` computes
+          `preset_names = presets.map(x => x.name)` for this group. The
+          module fills that field in from the key when it is missing, so a
+          preset can never appear as "undefined", and it refuses a value
+          that disagrees with the key.
+        '';
+        extra = ''
+          The reasoning templates — the prefix, suffix and separator a
+          reasoning model is wrapped in (`<think>…</think>` and friends).
+        '';
+        example = ''
+          {
+            "Think XML" = {
+              json = {
+                prefix = "<think>\n";
+                suffix = "\n</think>";
+                separator = "\n\n";
+              };
+            };
+          }
+        '';
+      };
+
+      themes = presetBucket {
+        directory = "themes";
+        labelFrom = ''
+          The dropdown label is a `name` field INSIDE the JSON, not the file
+          name — `public/scripts/power-user.js` builds the theme list from
+          `theme.name`. The module fills that field in from the key when it
+          is missing, so a theme can never appear as "undefined", and it
+          refuses a value that disagrees with the key.
+        '';
+        extra = ''
+          The UI themes — the colour palette, the blur, the font scale and
+          the rest of the appearance. Upstream ships a dozen
+          (`default/content/themes/`).
+
+          A theme is the closest thing to a "profile" in SillyTavern: it is
+          the whole look of the interface in one named, importable,
+          exportable document.
+        '';
+        example = ''
+          {
+            "Azure" = {
+              json = {
+                blur_strength = 11;
+                main_text_color = "rgba(171, 198, 223, 1)";
+              };
+            };
+          }
+        '';
+      };
+
+      movingUi = presetBucket {
+        directory = "movingUI";
+        labelFrom = ''
+          The dropdown label is a `name` field INSIDE the JSON, not the file
+          name — `public/scripts/power-user.js` builds the list from
+          `movingUIPreset.name`. The module fills that field in from the key
+          when it is missing, so a layout can never appear as "undefined",
+          and it refuses a value that disagrees with the key.
+        '';
+        extra = ''
+          The Moving UI layouts — the saved positions of the draggable
+          interface elements.
+        '';
+        example = ''
+          {
+            "Default" = {
+              json = {
+                movingUIState = { };
+              };
+            };
+          }
+        '';
+      };
+
+      quickReplies = presetBucket {
+        directory = "QuickReplies";
+        labelFrom = ''
+          The dropdown label is a `name` field INSIDE the JSON, not the file
+          name — the quick-reply extension keys its set list by the set's
+          own `name`
+          (`public/scripts/extensions/quick-reply/index.js`). The module
+          fills that field in from the key when it is missing, so a set can
+          never appear as "undefined", and it refuses a value that
+          disagrees with the key.
+        '';
+        extra = ''
+          The quick-reply sets — the named lists of canned replies and
+          slash commands.
+        '';
+        example = ''
+          {
+            "My Set" = {
+              json = {
+                quickReplyEnabled = true;
+                quickReplySlots = [
+                  {
+                    label = "HELP";
+                    mes = "/?";
+                    enabled = true;
+                  }
+                ];
+              };
+            };
+          }
+        '';
+      };
+
+      worlds = presetBucket {
+        directory = "worlds";
+        labelFrom = ''
+          The dropdown label is the FILE NAME, so the key is what the user
+          sees in the list. The server sends the World Info list as
+          `world_names`, derived from the file names
+          (`src/endpoints/settings.js`).
+        '';
+        extra = ''
+          The World Info books — the lorebooks, each one a set of keyword
+          entries injected into the prompt.
+        '';
+        example = ''
+          {
+            "Lore" = {
+              json = {
+                entries = {
+                  "1" = {
+                    uid = 1;
+                    key = "keyword";
+                    content = "the thing they never talk about";
+                  };
+                };
+              };
+            };
+          }
+        '';
+      };
+
+      workflows = presetBucket {
+        directory = "user/workflows";
+        labelFrom = ''
+          The dropdown label is the FILE NAME, so the key is what the user
+          sees in the list — upstream lists the directory
+          (`getComfyWorkflows` in `src/endpoints/stable-diffusion.js`).
+        '';
+        extra = ''
+          The saved ComfyUI workflows, for the image-generation extension.
+
+          Note that the ComfyUI backend's own dropdown is fed by the ComfyUI
+          SERVER, not by these files: these are the workflows saved locally,
+          which is where the extension's import and save actions put them.
+        '';
+        example = ''
+          {
+            "SDXL" = {
+              json = {
+                "3" = {
+                  class_type = "KSampler";
+                };
+              };
+            };
+          }
+        '';
       };
     };
   });
@@ -340,7 +818,12 @@ in
         ignores --configPath and --dataRoot and stores its data under the
         service account's ~/.local/share instead of the systemd StateDirectory.
       '';
-      defaultText = literalExpression "pkgs.sillytavern";
+      # NOT `pkgs.sillytavern`. That is nixpkgs' package of the same name —
+      # the one the error message above warns against — and it is not what the
+      # module uses. The default is the module's own build of THIS
+      # repository, from the filtered source, on the CONSUMER's package set.
+      # See modules/sillytavern.nix and lib/source.nix.
+      defaultText = literalExpression ''"this flake's own build of the SillyTavern source"'';
       description = "The SillyTavern package to run.";
     };
 
@@ -1861,11 +2344,11 @@ in
             oai_settings = {
               custom_url = "https://llm.example.com/v1";
               stream_openai = true;
-              max_context = 32768;
+              openai_max_context = 32768;
             };
             power_user = {
-              user_name = false;
-              quick_ui = true;
+              font_scale = 1.2;
+              fast_ui_mode = false;
             };
           }
         '';
@@ -1878,15 +2361,20 @@ in
 
           Note that `main_api` and friends are the account's *connection*
           settings. Pointing these at a host is a real, working configuration —
-          see `config.customUrl` / `config.openaiModel` for the server-side
-          equivalents.
+          see `settings.common.main_api` and
+          `settings.common.oai_settings.custom_url` for the server-side
+equivalents.
         '';
       };
 
       byUser = mkOption {
         type = types.attrsOf jsonObject;
         default = { };
-        example = literalExpression ''{ seanc = { oai_settings.max_context = 131072; }; }'';
+        # NESTED, not dotted. A key like `"oai_settings.openai_max_context"` type-checks
+        # here, is written to settings.json verbatim, and is then silently
+        # ignored by the server, which reads settings by direct property
+        # access. `modules/assertions.nix` now rejects the dotted form.
+        example = literalExpression ''{ seanc = { oai_settings = { openai_max_context = 131072; }; }; }'';
         description = ''
           Per-account `settings.json` overrides, keyed by account HANDLE.
 
@@ -1930,6 +2418,82 @@ in
         description = ''
           Per-account `files`, keyed by account HANDLE and then by relative path.
           Merged over `files.common`.
+        '';
+      };
+    };
+
+    # ── Named profiles: the things the UI offers in a dropdown ────────────────
+    #
+    # `files` above is the RAW layer: you name a path, and the path is what
+    # gets written. It is complete — every named item in SillyTavern is
+    # reachable through it — but it makes the user know upstream's directory
+    # names, and it makes every item an anonymous path rather than a named
+    # thing.
+    #
+    # This group is the NAMED layer. SillyTavern's UI is full of dropdowns of
+    # saved, named, importable/exportable items: the Text Completion presets,
+    # the AI Response Configuration presets, the Instruct / Context / Sysprompt
+    # / Reasoning templates, the themes, the lorebooks, the quick-reply sets,
+    # the Moving UI layouts, the ComfyUI workflows. Each is one JSON file per
+    # item, in a per-user directory, named after the item.
+    #
+    # So each of those gets a bucket here, keyed by NAME:
+    #
+    #   presets.common.instruct."Alpaca".json = { … };
+    #   presets.byUser.seanc.themes."Azure".json = { … };
+    #
+    # The directory is derived from the bucket, so nobody has to know that the
+    # Text Completion presets live in a directory called "TextGen Settings".
+    #
+    # `files` and `presets` are two views of the same files, not two sets of
+    # files: declaring the same path in both is an error, not a merge.
+    presets = {
+      common = mkOption {
+        type = presetBucketType;
+        default = { };
+        example = literalExpression ''
+          {
+            instruct."Alpaca".json = {
+              identifier = "alpaca";
+              input_sequence = "<|user|>";
+              output_sequence = "<|assistant|>";
+            };
+            themes."Azure".json = {
+              blur_strength = 11;
+            };
+          }
+        '';
+        description = ''
+          Named profiles seeded into EVERY account, keyed by bucket and then
+          by name.
+
+          Each bucket is one kind of item — the Text Completion presets, the
+          themes, the lorebooks — and each name is one saved item. See the
+          individual buckets for what each one is and where its name ends up.
+
+          The same buckets as `presets.byUser`, and merged with it the same way
+          `files.common` and `files.byUser` are.
+        '';
+      };
+
+      byUser = mkOption {
+        type = types.attrsOf presetBucketType;
+        default = { };
+        example = literalExpression ''
+          {
+            seanc = {
+              sysprompt."Roleplay - Detailed".json = {
+                content = "Write {{char}} as {{user}} would.";
+              };
+            };
+          }
+        '';
+        description = ''
+          Per-account named profiles, keyed by account HANDLE, then by bucket,
+          then by name.
+
+          Merged over `presets.common`, so a per-account item wins over a
+          common one with the same bucket and name.
         '';
       };
     };
@@ -2079,6 +2643,344 @@ in
           Installed as `<dataRoot>/_errors/url-not-found.html`. Served for any
           unmatched route, so this one is what a visitor sees for a typo'd URL
           or a stale bookmark.
+        '';
+      };
+    };
+
+    # ── Top-level settings.json keys ──────────────────────────────────────────
+    #
+    # These are the top-level keys in per-account `settings.json` that the UI
+    # manages but that had no first-class option. `settings.common` is a
+    # free-form JSON blob and could already carry them, but undiscoverable.
+    # These options are typed, documented, and deep-merged into every account's
+    # `settings.json` alongside `settings.common`.
+
+    settingsExtra = {
+      mainApi = mkOption {
+        type = types.str;
+        default = "openai";
+        description = ''
+          The AI provider selected in the UI (Settings → AI Configuration).
+          This is the account's *connection* setting — the server-side
+          equivalent is `config.oai_settings.custom_url` and friends.
+        '';
+      };
+
+      maxContext = mkOption {
+        type = types.int;
+        default = 4096;
+        description = ''
+          Default max context size (in tokens) for new chats. The UI exposes
+          this as a quick-setting; the server clamps it to the model's limit.
+        '';
+      };
+
+      background = {
+        url = mkOption {
+          type = types.str;
+          default = "";
+          description = ''
+            URL of the background image. Empty means the default background.
+          '';
+        };
+        name = mkOption {
+          type = types.str;
+          default = "";
+          description = ''
+            Display name for the background (used in the background picker).
+          '';
+        };
+        fitting = mkOption {
+          type = types.str;
+          default = "cover";
+          description = ''
+            How the background image fits the viewport. One of "cover",
+            "contain", "stretch", "center".
+          '';
+        };
+        animation = mkOption {
+          type = types.str;
+          default = "none";
+          description = ''
+            Animation applied to the background. One of "none", "pan", "zoom".
+          '';
+        };
+        sortOrder = mkOption {
+          type = types.int;
+          default = 0;
+          description = ''
+            Sort order in the background gallery. Lower values appear first.
+          '';
+        };
+        thumbnailColumns = mkOption {
+          type = types.int;
+          default = 4;
+          description = ''
+            Number of thumbnail columns in the background gallery.
+          '';
+        };
+      };
+
+      proxies = mkOption {
+        type = types.listOf (types.submodule {
+          options = {
+            name = mkOption {
+              type = types.str;
+              default = "";
+              description = "Display name for the proxy.";
+            };
+            url = mkOption {
+              type = types.str;
+              default = "";
+              description = "Proxy URL (e.g. http://proxy.example.com:8080).";
+            };
+            password = mkOption {
+              type = types.str;
+              default = "";
+              description = "Proxy password, if required.";
+            };
+    };
+  });
+
+
+        default = [ ];
+        description = ''
+          List of proxy configurations. The UI exposes these under
+          Settings → Connection → Proxies. `selected_proxy` below points at
+          one of these by index.
+        '';
+      };
+
+      selectedProxy = mkOption {
+        type = types.int;
+        default = 0;
+        description = ''
+          Index into `settingsExtra.proxies` of the active proxy. 0 means
+          "no proxy" (the default).
+        '';
+      };
+
+      swipes = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Whether swipe actions (swipe left/right to navigate message history)
+          are enabled. The UI exposes this as a toggle under Settings →
+          Chat/Message Handling.
+        '';
+      };
+
+      username = mkOption {
+        type = types.str;
+        default = "";
+        description = ''
+          The account's display name. Empty means the account handle is used.
+          This is separate from the account *handle* (which is the directory
+          name and login credential).
+        '';
+      };
+
+      extensionSettings = mkOption {
+        type = types.attrs;
+        default = { };
+        example = literalExpression ''
+          {
+            disabledExtensions = [ "caption" ];
+            expressionOverrides = [ "expression-1" ];
+          }
+        '';
+        description = ''
+          Free-form `extension_settings` object from `settings.json`. This is
+          the largest settings surface (216 leaves) and most of it is
+          extension-specific. Known keys include:
+
+          - `disabledExtensions` — list of extension names to disable
+          - `expressionOverrides` — list of expression override IDs
+          - `memory` — memory extension settings (chunk size, etc.)
+          - `apiUrl` / `apiKey` — extension API credentials
+          - `autoConnect` — auto-connect to extension on startup
+
+          Anything set here is deep-merged into every account's
+          `settings.json` under `extension_settings`.
+        '';
+      };
+
+      # ── The seven UI subtrees, typed ───────────────────────────────────────
+      #
+      # `settings.common` can carry every one of these, and always could. What
+      # it could not do is TELL you what they are: the names, the types and
+      # upstream's defaults were nowhere in the repository, so a typo was
+      # accepted and did nothing.
+      #
+      # These options are that knowledge, made into options. The tree is
+      # generated from `lib/settings-inventory.json`, which is derived from
+      # upstream's own source — so a setting added upstream appears here
+      # automatically, and one removed upstream stops being accepted.
+      #
+      # Three things to know:
+      #
+      #   * Option names are upstream's own, verbatim (`font_scale`, not
+      #     `fontScale`). These mirror a JSON document.
+      #   * Every leaf is `nullOr <type>` with `default = null`, and `null`
+      #     means "not declared" — the account keeps upstream's own default.
+      #     Upstream computes some defaults at runtime (a theme colour is read
+      #     out of the CSS), and pinning them would freeze them.
+      #   * The merge order is unchanged: `settingsExtra` (this) is the BASE
+      #     layer, `settings.common` overrides it, and `settings.byUser`
+      #     overrides both. So the same leaf can be set in either place, and
+      #     the more specific one wins.
+      #
+      # `settings.common` remains free-form, and the module still refuses a
+      # path upstream does not have — see `docs/settings-surface.md`.
+
+      # The User Settings panel: appearance, message handling, prompt macros,
+      # personas. 182 leaf fields.
+      powerUser = mkOption {
+        type = settingsTree.surfaceType "power_user";
+        default = { };
+        example = literalExpression ''
+          {
+            font_scale = 1.2;
+            fast_ui_mode = false;
+            chat_truncation = 200;
+          }
+        '';
+        description = ''
+          The `power_user` object in the account's `settings.json` — the
+          **User Settings** panel: interface, chat and message handling, prompt
+          macros, personas, and the stscript editor's preferences.
+
+          182 leaf fields, all declared individually below with upstream's own
+          names, types and defaults. `null` (the default) means "not
+          declared", and the account keeps upstream's default.
+        '';
+      };
+
+      # The AI Response Configuration panel: model, connection, sampling.
+      # 106 leaf fields.
+      oaiSettings = mkOption {
+        type = settingsTree.surfaceType "oai_settings";
+        default = { };
+        example = literalExpression ''
+          {
+            openai_max_context = 32768;
+            temp_openai = 0.7;
+            custom_url = "https://llm.example.com/v1";
+          }
+        '';
+        description = ''
+          The `oai_settings` object in the account's `settings.json` — the
+          **AI Response Configuration** panel: model selection, connection
+          settings, sampling parameters, and the prompt templates.
+
+          106 leaf fields, all declared individually below with upstream's own
+          names, types and defaults.
+
+          Note that the *server*-side equivalents live in `config.*` (see
+          `config.openaiModel`, `config.customUrl`); these are the account's
+          own copy of the same choices.
+        '';
+      };
+
+      # The Text Completion panel. 61 leaf fields — one per text-generation
+      # preset key.
+      textGenerationSettings = mkOption {
+        type = settingsTree.surfaceType "textgenerationwebui_settings";
+        default = { };
+        example = literalExpression ''
+          {
+            temp = 0.9;
+            top_p = 0.95;
+            rep_pen = 1.1;
+          }
+        '';
+        description = ''
+          The `textgenerationwebui_settings` object in the account's
+          `settings.json` — the **Text Completion** panel.
+
+          61 leaf fields, taken from the union of the shipped text-generation
+          presets. The presets themselves are files
+          (`files.byUser."TextGen Settings/<name>.json"`); these options set
+          the *active* values.
+        '';
+      };
+
+      # The NovelAI panel. 24 leaf fields.
+      naiSettings = mkOption {
+        type = settingsTree.surfaceType "nai_settings";
+        default = { };
+        example = literalExpression ''
+          {
+            temperature = 1.1;
+            repetition_penalty = 2.1;
+          }
+        '';
+        description = ''
+          The `nai_settings` object in the account's `settings.json` — the
+          **NovelAI** panel.
+
+          24 leaf fields, all declared individually below with upstream's own
+          names, types and defaults.
+        '';
+      };
+
+      # The KoboldAI Classic panel. 20 leaf fields.
+      kaiSettings = mkOption {
+        type = settingsTree.surfaceType "kai_settings";
+        default = { };
+        example = literalExpression ''
+          {
+            temp = 0.8;
+            top_k = 40;
+          }
+        '';
+        description = ''
+          The `kai_settings` object in the account's `settings.json` — the
+          **KoboldAI Classic** panel.
+
+          20 leaf fields, all declared individually below with upstream's own
+          names, types and defaults.
+        '';
+      };
+
+      # The AI Horde panel. 4 leaf fields.
+      hordeSettings = mkOption {
+        type = settingsTree.surfaceType "horde_settings";
+        default = { };
+        example = literalExpression ''
+          {
+            auto_adjust_context_length = true;
+          }
+        '';
+        description = ''
+          The `horde_settings` object in the account's `settings.json` — the
+          **AI Horde** panel.
+
+          4 leaf fields, all declared individually below with upstream's own
+          names, types and defaults.
+        '';
+      };
+
+      # The World Info (lorebook) panel. 13 leaf fields — the *policy* for
+      # how lorebooks are scanned, not the lorebooks themselves.
+      worldInfoSettings = mkOption {
+        type = settingsTree.surfaceType "world_info_settings";
+        default = { };
+        example = literalExpression ''
+          {
+            world_info_depth = 4;
+            world_info_budget = 500;
+            world_info_recursive = true;
+          }
+        '';
+        description = ''
+          The `world_info_settings` object in the account's `settings.json` —
+          the **World Info** panel: how lorebooks are scanned and injected.
+
+          13 leaf fields, all declared individually below with upstream's own
+          names, types and defaults. The lorebooks themselves are files
+          (`files.byUser."worlds/<name>.json"`); these are the rules applied
+          to them.
         '';
       };
     };
@@ -2275,6 +3177,94 @@ in
             default = "SillyTavern";
             description = "Human-readable name, for a proxy's admin UI.";
           };
+
+          # ── The four things a proxy in front of SillyTavern gets wrong ────
+          #
+          # None of these open a socket. They exist so the values the proxy
+          # MUST be configured with are declared in one place, next to the
+          # server options they interact with, instead of being rediscovered
+          # as a 413 or a blank page in production. See
+          # docs/installing.md "Behind a reverse proxy" for what breaks when
+          # each is wrong.
+
+          hosts = mkOption {
+            type = types.listOf types.str;
+            default = [ ];
+            example = [ "st.example.com" ];
+            description = ''
+              Host names this upstream answers to.
+
+              SillyTavern inspects the `Host` header when
+              `config.hostWhitelist.enabled` is true
+              (`src/middleware/hostWhitelist.js:26`), and behind a reverse proxy
+              that header is the PUBLIC name, not `localhost`. Enabling the
+              whitelist without listing the public name rejects every request.
+
+              An assertion requires this to be non-empty whenever
+              `config.hostWhitelist.enabled` is true. Empty is correct for a
+              loopback-only instance behind no proxy.
+            '';
+          };
+
+          maxBodySize = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            example = "512m";
+            description = ''
+              Maximum request body the proxy should accept.
+
+              `null` means "the proxy's own default", which is almost always
+              WRONG: `src/server-main.js` configures body parsers with a `500mb`
+              limit, because character cards, backgrounds, chat imports and
+              `settings.json` are all uploaded as JSON. nginx's
+              `client_max_body_size` defaults to **1 MB**, so the documented
+              topology fails with a bare `413 Request Entity Too Large` on the
+              first avatar upload and nothing in the SillyTavern log explains
+              it.
+
+              Unrelated to `config.performance.requestCompression`, which
+              compresses OUTBOUND requests to LLM providers.
+            '';
+          };
+
+          forwardedFor = mkOption {
+            type = types.enum [ "append" "replace" "off" ];
+            default = "replace";
+            description = ''
+              Whether the proxy REPLACES or APPENDS to `X-Forwarded-For`.
+
+              `config.enableForwardedWhitelist` defaults to **true**, and
+              `src/express-common.js` prefers `x-real-ip`, then
+              `cf-connecting-ip`, then the FIRST entry of `x-forwarded-for`.
+              An appending proxy lets a client send its own `X-Forwarded-For`,
+              whose first entry is attacker-chosen — so `whitelist` and
+              `rateLimiting.preferRealIpHeader` then trust a spoofed address.
+
+              `replace` means forward the immediate peer's address
+              (nginx `$remote_addr`, Caddy's default). `off` means do not emit
+              the header at all, which is only safe together with
+              `config.enableForwardedWhitelist = false`.
+            '';
+          };
+
+          readTimeout = mkOption {
+            type = types.nullOr types.str;
+            default = null;
+            example = "1h";
+            description = ''
+              Proxy read timeout for this upstream.
+
+              `null` leaves the proxy's default, and most defaults (60s for
+              nginx `proxy_read_timeout`) are far shorter than a long LLM
+              generation streaming tokens over SSE. The symptom is a
+              mid-answer `502`, which looks like the model failing rather than
+              the proxy giving up.
+
+              This is an INACTIVITY timeout: it resets on every chunk written, so
+              it needs to exceed the longest gap between tokens, not the whole
+              response.
+            '';
+          };
         };
       });
       default = [ ];
@@ -2283,13 +3273,21 @@ in
         Reverse-proxy upstreams describing this instance.
 
         Deliberately just DATA: this project does not depend on any particular
-        reverse-proxy module, so it cannot open a proxy hole for you. Wire it into
-        whatever you use:
+        reverse-proxy module, so it cannot open a proxy hole for you. Wire it
+        into whatever you use:
 
-          proxy.upstreams = lib.mkMerge (map mkUpstream
-            (config.services.sillytavern-nixos.proxyUpstreams));
+          proxy.upstreams = lib.mkMerge (
+            map inputs.sillytavern.lib.mkProxyUpstream
+              config.services.sillytavern-nixos.proxyUpstreams);
 
-        `self.lib.mkProxyUpstream { inherit config; }` builds the default entry.
+        `self.lib.mkProxyUpstream { inherit config; }` builds a default entry
+        from the live `config.port`, and is the form to use when you are NOT
+        mapping over the list above.
+
+        `hosts`, `maxBodySize`, `forwardedFor` and `readTimeout` are carried
+        through to the emitted upstream so a consumer's proxy module can
+        interpolate them. They are declarative facts about the deployment, not
+        something this module can enforce on a proxy it does not control.
       '';
     };
 
@@ -2350,22 +3348,48 @@ in
       description = "Resource limits for the systemd unit. All null = no limit.";
     };
 
-    systemdOverrides = mkOption {
-      type = types.attrs;
-      default = { };
-      example = literalExpression ''
-        {
-          Restart = "always";
-          LimitNOFILE = 65536;
-        }
-      '';
-      description = ''
-        Raw systemd unit options merged last, after everything this module sets.
+systemdOverrides = mkOption {
+        type = types.attrs;
+        default = { };
+        example = literalExpression ''
+          {
+            # Anything in here is written into the unit file verbatim, so it is
+            # NOT validated. Systemd directive names and case, exactly.
+            # The two halves of the unit are DIFFERENT option sets, and getting
+            # that wrong fails loudly at eval rather than silently:
+            #
+            #   `serviceConfig.*` -> a systemd [Service] directive. `Restart`,
+            #     `LimitNOFILE`, `ReadWritePaths`, `Environment`… all go here.
+            #
+            #   unit-level       -> NixOS' `systemd.services.<name>` options.
+            #     `description`, `after`, `wantedBy`, `restartTriggers`…
+            #     Putting `Restart` HERE fails with "The option
+            #     systemd.services.sillytavern.Restart does not exist", because
+            #     NixOS only declares `Restart` inside `serviceConfig`.
+            serviceConfig.ReadWritePaths = [ "/var/lib/sillytavern/extra" ];
+          }
+        '';
+        description = ''
+          Raw systemd unit options, merged last.
 
-        The escape hatch for the unit, equivalent in spirit to `extraConfig` for
-        `config.yaml`. Not validated.
-      '';
-    };
+          The escape hatch for the unit, equivalent in spirit to `extraConfig`
+          for `config.yaml`. Not validated.
+
+          A `serviceConfig` given here is MERGED into the one this module
+          builds, key by key — it adds to or replaces individual directives, and
+          the rest of the unit (ExecStart, User, StateDirectory, the hardening
+          block) is left intact. That is the only safe way to use this option.
+
+          It was previously applied to the whole unit instead, and attrset `//`
+          replaces rather than merges — so a single `serviceConfig` key here
+          silently discarded the entire block. Verified live: with
+          `systemdOverrides = { serviceConfig.ReadWritePaths = [ "/tmp/x" ]; };`
+          the resulting `serviceConfig` was reduced to exactly
+          `[ "ExecStartPre" "ReadWritePaths" ]` — a unit with no `ExecStart`
+          (so it never starts), no `User`, no `StateDirectory`, and no
+          hardening, while `nixos-rebuild` stayed green.
+        '';
+      };
 
     # ── TLS convenience ───────────────────────────────────────────────────────
 

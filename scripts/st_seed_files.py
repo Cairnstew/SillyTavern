@@ -255,6 +255,24 @@ def policy_for(entry: dict, default: str) -> str:
     return raw
 
 
+def is_tree(content: dict) -> bool:
+    """Whether this entry names a DIRECTORY to copy wholesale.
+
+    A per-account UI extension is not a file. `src/endpoints/extensions.js`
+    installs one into `<user>/extensions/<name>/` as a tree of JS plus a
+    `manifest.json`, and the seeder could not express that at all: it wrote
+    exactly one file per entry, so pointing `path` at a directory failed with
+    `Is a directory` and — because that is an `OSError`, not a `SeedError` —
+    took the whole activation's seeding down with it.
+
+    Detected here rather than validated in Nix because a store path's being a
+    directory is not decidable at evaluation time without reading it, and
+    `builtins.readDir` throws on a file.
+    """
+    src = content.get("path")
+    return isinstance(src, str) and os.path.isdir(src)
+
+
 def payload_for(content: dict) -> bytes:
     """Turn one `{"json": …}` / `{"path": …}` entry into bytes on disk."""
     has_json = "json" in content and content["json"] is not None
@@ -279,6 +297,61 @@ def payload_for(content: dict) -> bytes:
 # ── seeding ──────────────────────────────────────────────────────────────────
 
 
+def seed_tree(
+    src: str, target: str, policy: str, dry_run: bool, mode: int, stats: dict
+) -> None:
+    """Copy a directory into place.
+
+    Semantics mirror the single-file case, deliberately:
+
+      * `missing` — if the TARGET directory already exists, nothing inside it is
+        touched, not even files the tree would add. A per-account extension the
+        user edited through the UI is theirs.
+      * `overwrite` — the tree is re-copied file by file. Files the user added
+        that the source no longer has are LEFT ALONE rather than deleted: this
+        is a seed, not a sync, and silently removing somebody's work because a
+        Nix expression stopped mentioning a file would be unforgivable.
+
+    Nothing is written until every source file has been read, so a permission
+    error part-way through cannot leave a half-copied extension behind.
+    """
+    if os.path.exists(target) and policy == "missing":
+        stats["skipped"] += 1
+        return
+
+    wanted = []
+    for dirpath, _dirnames, filenames in os.walk(src):
+        for name in filenames:
+            absolute = os.path.join(dirpath, name)
+            relative = os.path.relpath(absolute, src)
+            wanted.append((absolute, os.path.join(target, relative)))
+
+    # Read everything first: a failure here must not leave a partial tree.
+    payloads = []
+    for absolute, _destination in wanted:
+        try:
+            with open(absolute, "rb") as fh:
+                payloads.append(fh.read())
+        except OSError as exc:
+            raise SeedError(f"cannot read {absolute}: {exc}") from exc
+
+    for (absolute, destination), data in zip(wanted, payloads):
+        if os.path.exists(destination) and policy == "missing":
+            stats["skipped"] += 1
+            continue
+        write_atomic(destination, data, dry_run, mode)
+        stats["written"] += 1
+        if not dry_run:
+            _log(f"{'restored' if os.path.exists(destination) else 'created'} "
+                 f"{os.path.relpath(destination, target)}")
+
+    # A tree that is empty on disk still needs the directory itself to exist,
+    # because the server looks for `<extensions>/<name>/manifest.json` and a
+    # missing parent produces a confusing 404 rather than "no extension".
+    if not wanted and not dry_run:
+        os.makedirs(target, exist_ok=True)
+
+
 def seed_file(
     root: str, rel: str, content: dict, policy: str, dry_run: bool, stats: dict
 ) -> None:
@@ -290,6 +363,13 @@ def seed_file(
     if exists and effective_policy == "missing":
         stats["skipped"] += 1
         return
+
+    if is_tree(content):
+        seed_tree(content["path"], target, effective_policy, dry_run, effective_mode, stats)
+        if not dry_run:
+            _log(f"{'restored' if exists else 'created'} {rel}/ (directory)")
+        return
+
     write_atomic(target, payload_for(content), dry_run, effective_mode)
     stats["written"] += 1
     if not dry_run:

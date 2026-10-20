@@ -1,0 +1,2514 @@
+{
+  "generatedFrom": {
+    "topLevelKeys": "public/script.js (saveSettings payload)",
+    "surfaces": [
+      "power_user <- public/scripts/power-user.js",
+      "oai_settings <- public/scripts/openai.js",
+      "kai_settings <- public/scripts/kai-settings.js",
+      "nai_settings <- public/scripts/nai-settings.js",
+      "horde_settings <- public/scripts/horde.js",
+      "world_info_settings <- public/scripts/world-info.js",
+      "textgenerationwebui_settings <- default/content/presets/textgen/*.json"
+    ]
+  },
+  "topLevelKeys": [
+    "firstRun",
+    "accountStorage",
+    "currentVersion",
+    "username",
+    "active_character",
+    "active_group",
+    "user_avatar",
+    "amount_gen",
+    "max_context",
+    "main_api",
+    "world_info_settings",
+    "textgenerationwebui_settings",
+    "swipes",
+    "horde_settings",
+    "power_user",
+    "extension_settings",
+    "tags",
+    "tag_map",
+    "nai_settings",
+    "kai_settings",
+    "oai_settings",
+    "background",
+    "proxies",
+    "selected_proxy"
+  ],
+  "surfaces": {
+    "power_user": {
+      "file": "public/scripts/power-user.js",
+      "fields": [
+        {
+          "path": "charListGrid",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "tokenizer",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "token_padding",
+          "type": "int",
+          "value": 64
+        },
+        {
+          "path": "collapse_newlines",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "pin_examples",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "strip_examples",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "trim_sentences",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "always_force_name2",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "user_prompt_bias",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "show_user_prompt_bias",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "auto_continue.enabled",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "auto_continue.allow_chat_completions",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "auto_continue.target_length",
+          "type": "int",
+          "value": 400
+        },
+        {
+          "path": "markdown_escape_strings",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "chat_truncation",
+          "type": "int",
+          "value": 100
+        },
+        {
+          "path": "streaming_fps",
+          "type": "int",
+          "value": 30
+        },
+        {
+          "path": "smooth_streaming",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "smooth_streaming_no_think",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "smooth_streaming_speed",
+          "type": "int",
+          "value": 50
+        },
+        {
+          "path": "stream_fade_in",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "fast_ui_mode",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "avatar_style",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "chat_display",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "toastr_position",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "chat_width",
+          "type": "int",
+          "value": 50
+        },
+        {
+          "path": "never_resize_avatars",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "show_card_avatar_urls",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "play_message_sound",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "play_sound_unfocused",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "auto_save_msg_edits",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "confirm_message_delete",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "sort_field",
+          "type": "str",
+          "value": "name"
+        },
+        {
+          "path": "sort_order",
+          "type": "str",
+          "value": "asc"
+        },
+        {
+          "path": "sort_rule",
+          "type": "null",
+          "value": null
+        },
+        {
+          "path": "font_scale",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "blur_strength",
+          "type": "int",
+          "value": 10
+        },
+        {
+          "path": "shadow_width",
+          "type": "int",
+          "value": 2
+        },
+        {
+          "path": "main_text_color",
+          "type": "str",
+          "value": "unknown"
+        },
+        {
+          "path": "italics_text_color",
+          "type": "str",
+          "value": "unknown"
+        },
+        {
+          "path": "underline_text_color",
+          "type": "str",
+          "value": "unknown"
+        },
+        {
+          "path": "quote_text_color",
+          "type": "str",
+          "value": "unknown"
+        },
+        {
+          "path": "blur_tint_color",
+          "type": "str",
+          "value": "unknown"
+        },
+        {
+          "path": "chat_tint_color",
+          "type": "str",
+          "value": "unknown"
+        },
+        {
+          "path": "user_mes_blur_tint_color",
+          "type": "str",
+          "value": "unknown"
+        },
+        {
+          "path": "bot_mes_blur_tint_color",
+          "type": "str",
+          "value": "unknown"
+        },
+        {
+          "path": "shadow_color",
+          "type": "str",
+          "value": "unknown"
+        },
+        {
+          "path": "border_color",
+          "type": "str",
+          "value": "unknown"
+        },
+        {
+          "path": "custom_css",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "waifuMode",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "movingUI",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "movingUIPreset",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "noShadows",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "theme",
+          "type": "str",
+          "value": "Default (Dark) 1.7.1"
+        },
+        {
+          "path": "gestures",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "auto_swipe",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "auto_swipe_minimum_length",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "auto_swipe_blacklist",
+          "type": "array",
+          "value": []
+        },
+        {
+          "path": "auto_swipe_blacklist_threshold",
+          "type": "int",
+          "value": 2
+        },
+        {
+          "path": "auto_scroll_chat_to_bottom",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "auto_fix_generated_markdown",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "send_on_enter",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "console_log_prompts",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "request_token_probabilities",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "show_group_chat_queue",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "allow_name1_display",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "allow_name2_display",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "hotswap_enabled",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "timer_enabled",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "timestamps_enabled",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "timestamp_model_icon",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "mesIDDisplay_enabled",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "hideChatAvatars_enabled",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "max_context_unlocked",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "message_token_count_enabled",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "expand_message_actions",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "enableZenSliders",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "enableLabMode",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "prefer_character_prompt",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "prefer_character_jailbreak",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "quick_continue",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "quick_impersonate",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "continue_on_send",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "trim_spaces",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "relaxed_api_urls",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "world_import_dialog",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "enable_auto_select_input",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "enable_md_hotkeys",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "tag_import_setting",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "tag_sort_mode",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "disable_group_trimming",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "single_line",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "instruct.enabled",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "instruct.preset",
+          "type": "str",
+          "value": "Alpaca"
+        },
+        {
+          "path": "instruct.input_sequence",
+          "type": "str",
+          "value": "### Instruction:"
+        },
+        {
+          "path": "instruct.input_suffix",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.output_sequence",
+          "type": "str",
+          "value": "### Response:"
+        },
+        {
+          "path": "instruct.output_suffix",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.system_sequence",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.system_suffix",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.last_system_sequence",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.first_input_sequence",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.first_output_sequence",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.last_input_sequence",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.last_output_sequence",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.story_string_prefix",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.story_string_suffix",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.stop_sequence",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.wrap",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "instruct.macro",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "instruct.names_behavior",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "instruct.activation_regex",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.bind_to_context",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "instruct.user_alignment_message",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.system_same_as_user",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "instruct.separator_sequence",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "instruct.sequences_as_stop_strings",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "context.preset",
+          "type": "str",
+          "value": "Default"
+        },
+        {
+          "path": "context.story_string",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "context.chat_start",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "context.example_separator",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "context.use_stop_strings",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "context.names_as_stop_strings",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "context.story_string_position",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "context.story_string_role",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "context.story_string_depth",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "instruct_derived",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "context_derived",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "context_size_derived",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "chat_template_hash",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "sysprompt.enabled",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "sysprompt.name",
+          "type": "str",
+          "value": "Neutral - Chat"
+        },
+        {
+          "path": "sysprompt.content",
+          "type": "str",
+          "value": "Write {{char}}'s next reply in a fictional chat between {{char}} and {{user}}."
+        },
+        {
+          "path": "sysprompt.post_history",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "reasoning.name",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "reasoning.auto_parse",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "reasoning.add_to_prompts",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "reasoning.auto_expand",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "reasoning.show_hidden",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "reasoning.prefix",
+          "type": "str",
+          "value": "<think>"
+        },
+        {
+          "path": "reasoning.suffix",
+          "type": "str",
+          "value": "</think>"
+        },
+        {
+          "path": "reasoning.separator",
+          "type": "str",
+          "value": "\n"
+        },
+        {
+          "path": "reasoning.max_additions",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "default_persona",
+          "type": "null",
+          "value": null
+        },
+        {
+          "path": "persona_description",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "persona_description_position",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "persona_description_role",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "persona_description_depth",
+          "type": "int",
+          "value": 2
+        },
+        {
+          "path": "persona_description_lorebook",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "persona_show_notifications",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "persona_sort_order",
+          "type": "str",
+          "value": "asc"
+        },
+        {
+          "path": "custom_stopping_strings",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "custom_stopping_strings_macro",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "fuzzy_search",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "encode_tags",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "experimental_macro_engine",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "servers",
+          "type": "array",
+          "value": []
+        },
+        {
+          "path": "bogus_folders",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "zoomed_avatar_magnification",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "show_tag_filters",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "aux_field",
+          "type": "str",
+          "value": "character_version"
+        },
+        {
+          "path": "stscript.matching",
+          "type": "str",
+          "value": "fuzzy"
+        },
+        {
+          "path": "stscript.autocomplete.state",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "stscript.autocomplete.autoHide",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "stscript.autocomplete.style",
+          "type": "str",
+          "value": "theme"
+        },
+        {
+          "path": "stscript.autocomplete.font.scale",
+          "type": "float",
+          "value": 0.8
+        },
+        {
+          "path": "stscript.autocomplete.width.left",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "stscript.autocomplete.width.right",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "stscript.autocomplete.select",
+          "type": "str",
+          "value": "unknownunknown"
+        },
+        {
+          "path": "stscript.autocomplete.showInAllMacroFields",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "restore_user_input",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "reduced_motion",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "compact_input_area",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "show_swipe_num_all_messages",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "auto_connect",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "auto_load_chat",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "forbid_external_media",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "external_media_allowed_overrides",
+          "type": "array",
+          "value": []
+        },
+        {
+          "path": "external_media_forbidden_overrides",
+          "type": "array",
+          "value": []
+        },
+        {
+          "path": "pin_styles",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "click_to_edit",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "media_display",
+          "type": "str",
+          "value": "list"
+        },
+        {
+          "path": "image_overswipe",
+          "type": "str",
+          "value": "generate"
+        }
+      ],
+      "openPaths": [
+        "model_templates_mappings",
+        "movingUIState",
+        "persona_descriptions",
+        "personas",
+        "stscript.parser.flags"
+      ]
+    },
+    "oai_settings": {
+      "file": "public/scripts/openai.js",
+      "fields": [
+        {
+          "path": "preset_settings_openai",
+          "type": "str",
+          "value": "Default"
+        },
+        {
+          "path": "temp_openai",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "freq_pen_openai",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "pres_pen_openai",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "top_p_openai",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "top_k_openai",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "min_p_openai",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "top_a_openai",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "repetition_penalty_openai",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "stream_openai",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "openai_max_context",
+          "type": "int",
+          "value": 4095
+        },
+        {
+          "path": "openai_max_tokens",
+          "type": "int",
+          "value": 300
+        },
+        {
+          "path": "prompts",
+          "type": "array",
+          "value": [
+            {
+              "name": {
+                "type": "str",
+                "value": "Main Prompt"
+              },
+              "system_prompt": {
+                "type": "bool",
+                "value": true
+              },
+              "role": {
+                "type": "str",
+                "value": "system"
+              },
+              "content": {
+                "type": "str",
+                "value": "Write {{char}}'s next reply in a fictional chat between {{charIfNotGroup}} and {{user}}."
+              },
+              "identifier": {
+                "type": "str",
+                "value": "main"
+              }
+            },
+            {
+              "name": {
+                "type": "str",
+                "value": "Auxiliary Prompt"
+              },
+              "system_prompt": {
+                "type": "bool",
+                "value": true
+              },
+              "role": {
+                "type": "str",
+                "value": "system"
+              },
+              "content": {
+                "type": "str",
+                "value": ""
+              },
+              "identifier": {
+                "type": "str",
+                "value": "nsfw"
+              }
+            },
+            {
+              "identifier": {
+                "type": "str",
+                "value": "dialogueExamples"
+              },
+              "name": {
+                "type": "str",
+                "value": "Chat Examples"
+              },
+              "system_prompt": {
+                "type": "bool",
+                "value": true
+              },
+              "marker": {
+                "type": "bool",
+                "value": true
+              }
+            },
+            {
+              "name": {
+                "type": "str",
+                "value": "Post-History Instructions"
+              },
+              "system_prompt": {
+                "type": "bool",
+                "value": true
+              },
+              "role": {
+                "type": "str",
+                "value": "system"
+              },
+              "content": {
+                "type": "str",
+                "value": ""
+              },
+              "identifier": {
+                "type": "str",
+                "value": "jailbreak"
+              }
+            },
+            {
+              "identifier": {
+                "type": "str",
+                "value": "chatHistory"
+              },
+              "name": {
+                "type": "str",
+                "value": "Chat History"
+              },
+              "system_prompt": {
+                "type": "bool",
+                "value": true
+              },
+              "marker": {
+                "type": "bool",
+                "value": true
+              }
+            },
+            {
+              "identifier": {
+                "type": "str",
+                "value": "worldInfoAfter"
+              },
+              "name": {
+                "type": "str",
+                "value": "World Info (after)"
+              },
+              "system_prompt": {
+                "type": "bool",
+                "value": true
+              },
+              "marker": {
+                "type": "bool",
+                "value": true
+              }
+            },
+            {
+              "identifier": {
+                "type": "str",
+                "value": "worldInfoBefore"
+              },
+              "name": {
+                "type": "str",
+                "value": "World Info (before)"
+              },
+              "system_prompt": {
+                "type": "bool",
+                "value": true
+              },
+              "marker": {
+                "type": "bool",
+                "value": true
+              }
+            },
+            {
+              "identifier": {
+                "type": "str",
+                "value": "enhanceDefinitions"
+              },
+              "role": {
+                "type": "str",
+                "value": "system"
+              },
+              "name": {
+                "type": "str",
+                "value": "Enhance Definitions"
+              },
+              "content": {
+                "type": "str",
+                "value": "If you have more knowledge of {{char}}, add to the character's lore and personality to enhance them but keep the Character Sheet's definitions absolute."
+              },
+              "system_prompt": {
+                "type": "bool",
+                "value": true
+              },
+              "marker": {
+                "type": "bool",
+                "value": false
+              }
+            },
+            {
+              "identifier": {
+                "type": "str",
+                "value": "charDescription"
+              },
+              "name": {
+                "type": "str",
+                "value": "Char Description"
+              },
+              "system_prompt": {
+                "type": "bool",
+                "value": true
+              },
+              "marker": {
+                "type": "bool",
+                "value": true
+              }
+            },
+            {
+              "identifier": {
+                "type": "str",
+                "value": "charPersonality"
+              },
+              "name": {
+                "type": "str",
+                "value": "Char Personality"
+              },
+              "system_prompt": {
+                "type": "bool",
+                "value": true
+              },
+              "marker": {
+                "type": "bool",
+                "value": true
+              }
+            },
+            {
+              "identifier": {
+                "type": "str",
+                "value": "scenario"
+              },
+              "name": {
+                "type": "str",
+                "value": "Scenario"
+              },
+              "system_prompt": {
+                "type": "bool",
+                "value": true
+              },
+              "marker": {
+                "type": "bool",
+                "value": true
+              }
+            },
+            {
+              "identifier": {
+                "type": "str",
+                "value": "personaDescription"
+              },
+              "name": {
+                "type": "str",
+                "value": "Persona Description"
+              },
+              "system_prompt": {
+                "type": "bool",
+                "value": true
+              },
+              "marker": {
+                "type": "bool",
+                "value": true
+              }
+            }
+          ]
+        },
+        {
+          "path": "prompt_order",
+          "type": "array",
+          "value": []
+        },
+        {
+          "path": "send_if_empty",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "impersonation_prompt",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "new_chat_prompt",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "new_group_chat_prompt",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "new_example_chat_prompt",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "continue_nudge_prompt",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "bias_preset_selected",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "bias_presets.unknown",
+          "type": "array",
+          "value": []
+        },
+        {
+          "path": "bias_presets.Anti-bond",
+          "type": "array",
+          "value": [
+            {
+              "id": {
+                "type": "str",
+                "value": "22154f79-dd98-41bc-8e34-87015d6a0eaf"
+              },
+              "text": {
+                "type": "str",
+                "value": " bond"
+              },
+              "value": {
+                "type": "int",
+                "value": -50
+              }
+            },
+            {
+              "id": {
+                "type": "str",
+                "value": "8ad2d5c4-d8ef-49e4-bc5e-13e7f4690e0f"
+              },
+              "text": {
+                "type": "str",
+                "value": " future"
+              },
+              "value": {
+                "type": "int",
+                "value": -50
+              }
+            },
+            {
+              "id": {
+                "type": "str",
+                "value": "52a4b280-0956-4940-ac52-4111f83e4046"
+              },
+              "text": {
+                "type": "str",
+                "value": " bonding"
+              },
+              "value": {
+                "type": "int",
+                "value": -50
+              }
+            },
+            {
+              "id": {
+                "type": "str",
+                "value": "e63037c7-c9d1-4724-ab2d-7756008b433b"
+              },
+              "text": {
+                "type": "str",
+                "value": " connection"
+              },
+              "value": {
+                "type": "int",
+                "value": -25
+              }
+            }
+          ]
+        },
+        {
+          "path": "wi_format",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "group_nudge_prompt",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "scenario_format",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "personality_format",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "sort_models",
+          "type": "str",
+          "value": "alphabetically"
+        },
+        {
+          "path": "group_models",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "openai_model",
+          "type": "str",
+          "value": "gpt-5.6-terra"
+        },
+        {
+          "path": "claude_model",
+          "type": "str",
+          "value": "claude-sonnet-5"
+        },
+        {
+          "path": "google_model",
+          "type": "str",
+          "value": "gemini-3.7-flash"
+        },
+        {
+          "path": "vertexai_model",
+          "type": "str",
+          "value": "gemini-3.7-flash"
+        },
+        {
+          "path": "ai21_model",
+          "type": "str",
+          "value": "jamba-large"
+        },
+        {
+          "path": "mistralai_model",
+          "type": "str",
+          "value": "mistral-large-latest"
+        },
+        {
+          "path": "cohere_model",
+          "type": "str",
+          "value": "command-r-plus"
+        },
+        {
+          "path": "perplexity_model",
+          "type": "str",
+          "value": "sonar-pro"
+        },
+        {
+          "path": "groq_model",
+          "type": "str",
+          "value": "llama-3.3-70b-versatile"
+        },
+        {
+          "path": "chutes_model",
+          "type": "str",
+          "value": "deepseek-ai/DeepSeek-V3-0324"
+        },
+        {
+          "path": "siliconflow_model",
+          "type": "str",
+          "value": "deepseek-ai/DeepSeek-V3"
+        },
+        {
+          "path": "siliconflow_endpoint",
+          "type": "str",
+          "value": "global"
+        },
+        {
+          "path": "minimax_model",
+          "type": "str",
+          "value": "MiniMax-M2.7"
+        },
+        {
+          "path": "minimax_endpoint",
+          "type": "str",
+          "value": "global"
+        },
+        {
+          "path": "electronhub_model",
+          "type": "str",
+          "value": "gpt-4o-mini"
+        },
+        {
+          "path": "nanogpt_model",
+          "type": "str",
+          "value": "gpt-4o-mini"
+        },
+        {
+          "path": "nanogpt_provider",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "nanogpt_payg_override",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "deepseek_model",
+          "type": "str",
+          "value": "deepseek-v4-flash"
+        },
+        {
+          "path": "aimlapi_model",
+          "type": "str",
+          "value": "chatgpt-4o-latest"
+        },
+        {
+          "path": "xai_model",
+          "type": "str",
+          "value": "grok-3-beta"
+        },
+        {
+          "path": "pollinations_model",
+          "type": "str",
+          "value": "openai"
+        },
+        {
+          "path": "pollinations_endpoint",
+          "type": "str",
+          "value": "authenticated"
+        },
+        {
+          "path": "cometapi_model",
+          "type": "str",
+          "value": "gpt-4o"
+        },
+        {
+          "path": "moonshot_model",
+          "type": "str",
+          "value": "kimi-latest"
+        },
+        {
+          "path": "fireworks_model",
+          "type": "str",
+          "value": "accounts/fireworks/models/kimi-k2-instruct"
+        },
+        {
+          "path": "zai_model",
+          "type": "str",
+          "value": "glm-4.6"
+        },
+        {
+          "path": "zai_endpoint",
+          "type": "str",
+          "value": "common"
+        },
+        {
+          "path": "workers_ai_model",
+          "type": "str",
+          "value": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+        },
+        {
+          "path": "workers_ai_account_id",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "azure_base_url",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "azure_deployment_name",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "azure_api_version",
+          "type": "str",
+          "value": "2024-02-15-preview"
+        },
+        {
+          "path": "azure_openai_model",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "custom_model",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "custom_url",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "custom_include_body",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "custom_exclude_body",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "custom_include_headers",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "openrouter_model",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "openrouter_use_fallback",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "openrouter_providers",
+          "type": "array",
+          "value": []
+        },
+        {
+          "path": "openrouter_quantizations",
+          "type": "array",
+          "value": []
+        },
+        {
+          "path": "openrouter_allow_fallbacks",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "openrouter_middleout",
+          "type": "str",
+          "value": "on"
+        },
+        {
+          "path": "tool_reasoning_mode",
+          "type": "str",
+          "value": "disabled"
+        },
+        {
+          "path": "reverse_proxy",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "chat_completion_source",
+          "type": "str",
+          "value": "openai"
+        },
+        {
+          "path": "max_context_unlocked",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "show_external_models",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "proxy_password",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "assistant_prefill",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "assistant_impersonation",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "use_sysprompt",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "vertexai_auth_mode",
+          "type": "str",
+          "value": "express"
+        },
+        {
+          "path": "vertexai_region",
+          "type": "str",
+          "value": "us-central1"
+        },
+        {
+          "path": "vertexai_express_project_id",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "squash_system_messages",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "media_inlining",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "inline_image_quality",
+          "type": "str",
+          "value": "auto"
+        },
+        {
+          "path": "bypass_status_check",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "continue_prefill",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "function_calling",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "tool_call_recurse_limit",
+          "type": "int",
+          "value": 5
+        },
+        {
+          "path": "names_behavior",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "continue_postfix",
+          "type": "str",
+          "value": " "
+        },
+        {
+          "path": "custom_prompt_post_processing",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "show_thoughts",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "reasoning_effort",
+          "type": "str",
+          "value": "auto"
+        },
+        {
+          "path": "verbosity",
+          "type": "str",
+          "value": "auto"
+        },
+        {
+          "path": "enable_web_search",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "request_images",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "request_image_aspect_ratio",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "request_image_resolution",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "seed",
+          "type": "int",
+          "value": -1
+        },
+        {
+          "path": "n",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "bind_preset_to_connection",
+          "type": "bool",
+          "value": true
+        }
+      ],
+      "openPaths": [
+        "bias_presets",
+        "extensions"
+      ]
+    },
+    "kai_settings": {
+      "file": "public/scripts/kai-settings.js",
+      "fields": [
+        {
+          "path": "temp",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "rep_pen",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "rep_pen_range",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "top_p",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "min_p",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "top_a",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "top_k",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "typical",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "tfs",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "rep_pen_slope",
+          "type": "float",
+          "value": 0.9
+        },
+        {
+          "path": "streaming_kobold",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "sampler_order",
+          "type": "array",
+          "value": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6
+          ]
+        },
+        {
+          "path": "mirostat",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "mirostat_tau",
+          "type": "int",
+          "value": 5
+        },
+        {
+          "path": "mirostat_eta",
+          "type": "float",
+          "value": 0.1
+        },
+        {
+          "path": "use_default_badwordsids",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "grammar",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "seed",
+          "type": "int",
+          "value": -1
+        },
+        {
+          "path": "api_server",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "preset_settings",
+          "type": "str",
+          "value": "gui"
+        }
+      ],
+      "openPaths": [
+        "extensions"
+      ]
+    },
+    "nai_settings": {
+      "file": "public/scripts/nai-settings.js",
+      "fields": [
+        {
+          "path": "temperature",
+          "type": "float",
+          "value": 1.5
+        },
+        {
+          "path": "repetition_penalty",
+          "type": "float",
+          "value": 2.25
+        },
+        {
+          "path": "repetition_penalty_range",
+          "type": "int",
+          "value": 2048
+        },
+        {
+          "path": "repetition_penalty_slope",
+          "type": "float",
+          "value": 0.09
+        },
+        {
+          "path": "repetition_penalty_frequency",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "repetition_penalty_presence",
+          "type": "float",
+          "value": 0.005
+        },
+        {
+          "path": "tail_free_sampling",
+          "type": "float",
+          "value": 0.975
+        },
+        {
+          "path": "top_k",
+          "type": "int",
+          "value": 10
+        },
+        {
+          "path": "top_p",
+          "type": "float",
+          "value": 0.75
+        },
+        {
+          "path": "top_a",
+          "type": "float",
+          "value": 0.08
+        },
+        {
+          "path": "typical_p",
+          "type": "float",
+          "value": 0.975
+        },
+        {
+          "path": "min_p",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "math1_temp",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "math1_quad",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "math1_quad_entropy_scale",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "min_length",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "model_novel",
+          "type": "str",
+          "value": "clio-v1"
+        },
+        {
+          "path": "preset_settings_novel",
+          "type": "str",
+          "value": "Talker-Chat-Clio"
+        },
+        {
+          "path": "streaming_novel",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "preamble",
+          "type": "unknown",
+          "value": null
+        },
+        {
+          "path": "prefix",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "banned_tokens",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "order",
+          "type": "array",
+          "value": [
+            1,
+            5,
+            0,
+            2,
+            3,
+            4
+          ]
+        },
+        {
+          "path": "logit_bias",
+          "type": "array",
+          "value": []
+        }
+      ],
+      "openPaths": [
+        "extensions"
+      ]
+    },
+    "horde_settings": {
+      "file": "public/scripts/horde.js",
+      "fields": [
+        {
+          "path": "models",
+          "type": "array",
+          "value": []
+        },
+        {
+          "path": "auto_adjust_response_length",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "auto_adjust_context_length",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "trusted_workers_only",
+          "type": "bool",
+          "value": false
+        }
+      ],
+      "openPaths": []
+    },
+    "world_info_settings": {
+      "file": "public/scripts/world-info.js",
+      "fields": [
+        {
+          "path": "world_info_depth",
+          "type": "int",
+          "value": 2
+        },
+        {
+          "path": "world_info_min_activations",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "world_info_min_activations_depth_max",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "world_info_budget",
+          "type": "int",
+          "value": 25
+        },
+        {
+          "path": "world_info_include_names",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "world_info_recursive",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "world_info_overflow_alert",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "world_info_case_sensitive",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "world_info_match_whole_words",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "world_info_character_strategy",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "world_info_budget_cap",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "world_info_use_group_scoring",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "world_info_max_recursion_steps",
+          "type": "int",
+          "value": 0
+        }
+      ],
+      "openPaths": [
+        "world_info"
+      ]
+    },
+    "textgenerationwebui_settings": {
+      "file": "default/content/presets/textgen/*.json",
+      "fields": [
+        {
+          "path": "temp",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "temperature_last",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "top_p",
+          "type": "float",
+          "value": 0.95
+        },
+        {
+          "path": "top_k",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "top_a",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "tfs",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "epsilon_cutoff",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "eta_cutoff",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "typical_p",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "min_p",
+          "type": "float",
+          "value": 0.01
+        },
+        {
+          "path": "rep_pen",
+          "type": "float",
+          "value": 1.1
+        },
+        {
+          "path": "rep_pen_range",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "rep_pen_decay",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "rep_pen_slope",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "no_repeat_ngram_size",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "penalty_alpha",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "num_beams",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "length_penalty",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "min_length",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "encoder_rep_pen",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "freq_pen",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "presence_pen",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "skew",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "do_sample",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "early_stopping",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "dynatemp",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "min_temp",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "max_temp",
+          "type": "int",
+          "value": 2
+        },
+        {
+          "path": "dynatemp_exponent",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "smoothing_factor",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "smoothing_curve",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "dry_allowed_length",
+          "type": "int",
+          "value": 2
+        },
+        {
+          "path": "dry_multiplier",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "dry_base",
+          "type": "float",
+          "value": 1.75
+        },
+        {
+          "path": "dry_sequence_breakers",
+          "type": "str",
+          "value": "[\"\\n\", \":\", \"\\\"\", \"*\"]"
+        },
+        {
+          "path": "dry_penalty_last_n",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "add_bos_token",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "ban_eos_token",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "skip_special_tokens",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "mirostat_mode",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "mirostat_tau",
+          "type": "int",
+          "value": 5
+        },
+        {
+          "path": "mirostat_eta",
+          "type": "float",
+          "value": 0.1
+        },
+        {
+          "path": "guidance_scale",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "negative_prompt",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "grammar_string",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "json_schema",
+          "type": "null",
+          "value": null
+        },
+        {
+          "path": "json_schema_allow_empty",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "banned_tokens",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "sampler_priority",
+          "type": "array",
+          "value": [
+            "repetition_penalty",
+            "presence_penalty",
+            "frequency_penalty",
+            "dry",
+            "temperature",
+            "dynamic_temperature",
+            "quadratic_sampling",
+            "top_n_sigma",
+            "top_k",
+            "top_p",
+            "typical_p",
+            "epsilon_cutoff",
+            "eta_cutoff",
+            "tfs",
+            "top_a",
+            "min_p",
+            "mirostat",
+            "xtc",
+            "encoder_repetition_penalty",
+            "no_repeat_ngram"
+          ]
+        },
+        {
+          "path": "samplers",
+          "type": "array",
+          "value": [
+            "penalties",
+            "dry",
+            "top_n_sigma",
+            "top_k",
+            "typ_p",
+            "tfs_z",
+            "typical_p",
+            "xtc",
+            "top_p",
+            "min_p",
+            "temperature"
+          ]
+        },
+        {
+          "path": "samplers_priorities",
+          "type": "array",
+          "value": [
+            "dry",
+            "penalties",
+            "no_repeat_ngram",
+            "temperature",
+            "top_nsigma",
+            "top_p_top_k",
+            "top_a",
+            "min_p",
+            "tfs",
+            "eta_cutoff",
+            "epsilon_cutoff",
+            "typical_p",
+            "quadratic",
+            "xtc"
+          ]
+        },
+        {
+          "path": "ignore_eos_token",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "spaces_between_special_tokens",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "speculative_ngram",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "sampler_order",
+          "type": "array",
+          "value": [
+            6,
+            0,
+            1,
+            3,
+            4,
+            2,
+            5
+          ]
+        },
+        {
+          "path": "logit_bias",
+          "type": "array",
+          "value": []
+        },
+        {
+          "path": "xtc_threshold",
+          "type": "float",
+          "value": 0.1
+        },
+        {
+          "path": "xtc_probability",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "nsigma",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "min_keep",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "rep_pen_size",
+          "type": "int",
+          "value": 0
+        }
+      ],
+      "openPaths": []
+    }
+  }
+}

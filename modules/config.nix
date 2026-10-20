@@ -69,6 +69,15 @@ let
     ;
 
   st = import ../lib { inherit lib; };
+
+  # The typed option tree for the `settings.json` UI surfaces, and the
+  # inventory it is built from. The same two files back the settings-key
+  # guard in modules/assertions.nix, so the option tree and the guard can
+  # never disagree about what a real setting is.
+  settingsTree = import ../lib/settings-tree.nix {
+    inherit lib;
+    inventory = builtins.fromJSON (builtins.readFile ../lib/settings-inventory.json);
+  };
   cfg = config.services.sillytavern-nixos;
 
   # ── Effective config ────────────────────────────────────────────────────────
@@ -440,6 +449,7 @@ let
     ++ [ "default-user" ]
     ++ lib.attrNames cfg.settings.byUser
     ++ lib.attrNames cfg.files.byUser
+    ++ lib.attrNames cfg.presets.byUser
     ++ lib.attrNames cfg.secrets.byUser
   );
 
@@ -516,10 +526,36 @@ let
         );
       users = lib.genAttrs seedHandles (
         handle: {
-          # `//` so a per-account leaf overrides the shared one without the
-          # account having to restate the rest of its tree.
-          settings = cfg.settings.common // (cfg.settings.byUser.${handle} or {});
-          files = cfg.files.common // (cfg.files.byUser.${handle} or {});
+          # `deepMerge`, NOT `//`. `//` is shallow: it would replace the whole
+          # `oai_settings` subtree, so a per-account override of one leaf
+          # silently deleted every sibling the account did not restate. That
+          # was a real bug — the option description and docs/options.md both
+          # promise a deep merge. See lib/default.nix and the check
+          # `settingsDeepMerge` in lib/tests.nix.
+          # Merge order: settingsExtra (defaults) → settings.common → settings.byUser.
+          # A per-account override always wins on a leaf both declare.
+          settings = st.deepMerge (st.deepMerge extraSettings cfg.settings.common) (cfg.settings.byUser.${handle} or {});
+          # `presets` and `files` are two VIEWS of the same files, so they are
+          # merged into one map here rather than kept apart.
+          #
+          # `st.mkPresetFiles` turns the named-profile tree into the
+          # `<directory>/<name>.json` paths it stands for, and injects the
+          # `name` field into the buckets whose dropdown label comes from
+          # inside the JSON.
+          #
+          # Merge order: presets.common → presets.byUser → files.common →
+          # files.byUser. `files` comes LAST because it is the raw layer: a
+          # path spelled out by hand is more specific than a name, so it
+          # wins. Declaring the same path in both is caught by an assertion
+          # rather than silently resolved here.
+          files = normaliseFiles (
+            st.deepMerge
+              (st.deepMerge
+                (st.mkPresetFiles cfg.presets.common)
+                (st.mkPresetFiles (cfg.presets.byUser.${handle} or {}))
+              )
+              (st.deepMerge cfg.files.common (cfg.files.byUser.${handle} or {}))
+          );
           # PATHS ONLY. A secret's bytes are read by the seeder at activation,
           # so nothing about the key itself reaches this file, the store, or
           # `nixos-rebuild` output.
@@ -532,6 +568,75 @@ let
         }
       );
     };
+
+  # ── Render settingsExtra into settings.json keys ─────────────────────────
+  #
+  # The new first-class options under `settingsExtra` map to top-level keys
+  # in per-account `settings.json`. They are deep-merged in the order:
+  #   settingsExtra (defaults) → settings.common → settings.byUser.<handle>
+  # so a per-account override always wins.
+  extraSettings = {
+    main_api = cfg.settingsExtra.mainApi;
+    max_context = cfg.settingsExtra.maxContext;
+    background = {
+      url = cfg.settingsExtra.background.url;
+      name = cfg.settingsExtra.background.name;
+      fitting = cfg.settingsExtra.background.fitting;
+      animation = cfg.settingsExtra.background.animation;
+      sortOrder = cfg.settingsExtra.background.sortOrder;
+      thumbnailColumns = cfg.settingsExtra.background.thumbnailColumns;
+    };
+    proxies = map (p: {
+      name = p.name;
+      url = p.url;
+      password = p.password;
+    }) cfg.settingsExtra.proxies;
+    selected_proxy = cfg.settingsExtra.selectedProxy;
+    swipes = cfg.settingsExtra.swipes;
+    username = cfg.settingsExtra.username;
+    extension_settings = cfg.settingsExtra.extensionSettings;
+
+    # The seven typed UI subtrees.
+    #
+    # PRUNED before they are merged: every leaf of a typed tree is
+    # `nullOr <type>` with `default = null`, so the option's value contains
+    # one null per declared field. `null` means "not declared" — the account
+    # keeps upstream's own default — and writing those nulls into
+    # `settings.json` would *override* upstream's defaults with null.
+    #
+    # A subtree with nothing declared prunes to `{}` and is left out
+    # entirely, so an account that declares nothing gets exactly the
+    # `settings.json` it got before this option existed.
+  } // lib.filterAttrs (_: v: v != { }) {
+    power_user = settingsTree.prune cfg.settingsExtra.powerUser;
+    oai_settings = settingsTree.prune cfg.settingsExtra.oaiSettings;
+    textgenerationwebui_settings = settingsTree.prune cfg.settingsExtra.textGenerationSettings;
+    nai_settings = settingsTree.prune cfg.settingsExtra.naiSettings;
+    kai_settings = settingsTree.prune cfg.settingsExtra.kaiSettings;
+    horde_settings = settingsTree.prune cfg.settingsExtra.hordeSettings;
+    world_info_settings = settingsTree.prune cfg.settingsExtra.worldInfoSettings;
+  };
+
+  # ── Seed-file entries: drop the unset knobs ────────────────────────────────
+  #
+  # `policy` and `mode` are submodule options, so every entry carries them as
+  # explicit `null`s once declared. The seeder reads both with
+  # `entry.get(...)`, which treats an absent key and a null value identically,
+  # so leaving them in would be harmless — but it would put `"policy": null,
+  # "mode": null` on every file in a spec that a human reads when debugging an
+  # activation, and it would change the rendered bytes for every existing user
+  # of this module for no behavioural gain.
+  #
+  # `nullsOnly` rather than a blunt `removeAttrs`: removing `json` or `path`
+  # because it happens to be null would break the "exactly one of the two"
+  # contract modules/assertions.nix enforces, and would erase the evidence for
+  # a mistyped entry. Only the two knobs that genuinely mean "inherit" go.
+  normaliseFiles =
+    entries:
+    lib.mapAttrs (
+      _name: entry:
+      lib.removeAttrs entry (lib.filter (k: entry.${k} == null) [ "policy" "mode" ])
+    ) entries;
 
   seedSpec = pkgs.writeText "sillytavern-seed-spec.json" (builtins.toJSON seedSpecJson);
 

@@ -22,6 +22,8 @@ let
   cfg = config.services.sillytavern-nixos;
   inherit (cfg.internal) effectiveConfig secretEnvFiles secretEnvValues seedSpecJson;
 
+  st = import ../lib { inherit lib; };
+
   # Whether NIXPKGS' `services.sillytavern` is enabled.
   #
   # `or false` here is a DELIBERATE detection of the nixpkgs namespace, and the
@@ -41,8 +43,189 @@ let
   seedHandles = lib.unique (
     lib.attrNames cfg.settings.byUser
     ++ lib.attrNames cfg.files.byUser
+    ++ lib.attrNames cfg.presets.byUser
     ++ lib.attrNames cfg.secrets.byUser
   );
+
+  # Every `files` entry, as { handle, path, entry } triples, so an assertion can
+  # name the exact declaration that is wrong rather than failing with an opaque
+  # type error from `mapAttrs`.
+  #
+  # `files.common` is tagged with a literal handle of "common" purely so the
+  # resulting message can say which map a bad path came from; nothing seeds
+  # under that name.
+  fileEntries =
+    lib.mapAttrsToList (
+      path: entry: { handle = "files.common"; inherit path entry; }
+    ) cfg.files.common
+    ++ lib.concatLists (
+      lib.mapAttrsToList (
+        handle: map:
+          lib.mapAttrsToList (path: entry: { inherit handle path entry; }) map
+      ) cfg.files.byUser
+    );
+
+  # Every `presets` declaration, as { handle, bucket, name, path, entry }.
+  #
+  # `presets` and `files` are two VIEWS of the same files, so a preset
+  # declaration has a path — the one `st.mkPresetFiles` will derive from it.
+  # The assertions below need that path to compare the two views.
+  presetEntries =
+    # `concatLists` because the inner `mapAttrsToList` returns a LIST of
+    # entries per bucket, and the outer one collects those lists — without
+    # flattening, every "entry" here is a list, and `e.name` on a list fails
+    # with an error that says nothing about presets.
+    lib.concatLists (
+      lib.mapAttrsToList (
+        bucket: entries:
+          lib.mapAttrsToList (
+            name: entry: {
+              handle = "presets.common";
+              inherit bucket name entry;
+              path = "${st.presetDirectories.${bucket}}/${name}.json";
+            }
+          ) entries
+      ) cfg.presets.common
+    )
+    ++ lib.concatLists (
+      lib.mapAttrsToList (
+        handle: buckets:
+          lib.concatLists (
+            lib.mapAttrsToList (
+              bucket: entries:
+                lib.mapAttrsToList (
+                  name: entry: {
+                    inherit handle bucket name entry;
+                    path = "${st.presetDirectories.${bucket}}/${name}.json";
+                  }
+                ) entries
+            ) buckets
+          )
+      ) cfg.presets.byUser
+    );
+
+  # The buckets whose dropdown label is a `name` field INSIDE the JSON, and
+  # whose entries therefore have a name that can DISAGREE with the key.
+  #
+  # `st.mkPresetFiles` fills the field in from the key when it is missing, so a
+  # preset can never show up as "undefined". It cannot fix a field that is
+  # present and wrong, so that case is an assertion.
+  presetNameMismatches = builtins.filter (
+    e:
+      lib.elem e.bucket st.presetNameFromContentBuckets
+      && e.entry.json != null
+      && lib.isAttrs e.entry.json
+      && e.entry.json ? name
+      && e.entry.json.name != e.name
+  ) presetEntries;
+
+  # A name becomes a FILE NAME, so it must not be a path.
+  #
+  # A `/` in the name would create a subdirectory the server never reads, and
+  # `..` would climb out of the account's directory entirely. Neither is
+  # refused loudly anywhere else: the seeder would write the file and the
+  # dropdown would simply not show it.
+  illegalPresetNames = builtins.filter (
+    e: (lib.hasInfix "/" e.name) || e.name == ".." || e.name == "."
+  ) presetEntries;
+
+  # The same file declared through BOTH views.
+  #
+  # `presets` derives a path from a bucket and a name; `files` states a path.
+  # Declaring the same file in both is not a merge — it is two claims on one
+  # file, and the merge in `modules/config.nix` would silently let `files`
+  # win, so the `presets` declaration would quietly do nothing.
+  #
+  # Compared per ACCOUNT, because that is the scope in which the two views
+  # actually collide: `presets.common` applies to every account, and so does
+  # `files.common`.
+  allHandles = lib.unique (
+    declaredHandles
+    ++ lib.map (e: e.handle) (builtins.filter (e: e.handle != "presets.common") presetEntries)
+    ++ lib.map (e: e.handle) (builtins.filter (e: e.handle != "files.common") fileEntries)
+  );
+
+  presetFilesCollisions =
+    lib.unique (
+      lib.concatMap
+        (handle:
+          let
+            presetPaths =
+              lib.map (e: e.path) (
+                builtins.filter (e: e.handle == handle || e.handle == "presets.common") presetEntries
+              );
+            filePaths =
+              lib.map (e: e.path) (
+                builtins.filter (e: e.handle == handle || e.handle == "files.common") fileEntries
+              );
+          in
+          lib.map (path: { inherit handle path; }) (
+            builtins.filter (p: lib.elem p filePaths) presetPaths
+          )
+        )
+        allHandles
+    );
+
+  # The seeder's deny-list, mirrored here.
+  #
+  # `scripts/st_seed_files.py` refuses these at ACTIVATION time. It does so by
+  # raising `SeedError` on the FIRST bad entry, which `main()` turns into exit
+  # code 2 — and `main` is the last command in the unit's `preStart`, so the
+  # `ExecStartPre` fails and THE UNIT DOES NOT START. Entries visited before the
+  # bad one have already been written, leaving a half-seeded data root.
+  #
+  # Verified live: a spec with `backups/bad.json` between two good entries wrote
+  # the first, refused the second, skipped the third, and exited 2.
+  #
+  # So a single typo here means `nixos-rebuild switch` reports success and the
+  # service is simply dead afterwards. This file's entire reason for existing is
+  # configurations that fail silently, and that is exactly what an unchecked
+  # reserved path is.
+  #
+  # Kept deliberately in sync with the Python by nix-tests/test_seed_files.py,
+  # which reads these same names back out of `src_seed_files` — so drift in
+  # either direction fails the suite rather than sitting here quietly.
+  #
+  # `config.yaml` is refused because a `configPath` is the supported route (see
+  # `cli.configPath`); `stats.json` is pure server bookkeeping; `secrets.json`
+  # is owned by the `secrets` mechanism, which writes the array-of-records shape
+  # the server actually reads.
+  reservedBasenames = [ "stats.json" "config.yaml" "secrets.json" ];
+
+  # Matched against the FIRST path component only, exactly as
+  # `safe_join` does (`parts[0]`). So `backups/x.json` is refused but
+  # `user/backups/x.json` — a per-user directory that happens to be named
+  # `backups` inside some other folder — is not, which is correct because the
+  # seeder resolves per-account paths against the account directory.
+  reservedTopLevel = [ "_storage" "_webpack" "_sc" "_cache" "backups" ];
+
+  # `_errors/` is not blanket-refused: upstream serves exactly four HTML files
+  # from it, and the `errorPages` options exist to write them. Anything else
+  # under `_errors/` is never read, so allowing it would create a file that
+  # looks meaningful and is not.
+  allowedErrorPages = [
+    "forbidden-by-whitelist.html"
+    "host-not-allowed.html"
+    "unauthorized.html"
+    "url-not-found.html"
+  ];
+
+  reservedReason =
+    e:
+    let
+      parts = lib.splitString "/" e.path;
+      top = lib.head parts;
+    in
+    if lib.elem (builtins.baseNameOf e.path) reservedBasenames then
+      "a reserved filename the server or another option owns"
+    else if lib.elem top reservedTopLevel then
+      "'${top}/' is reserved server state at the top level of the account directory"
+    else if top == "_errors" && !(lib.elem (lib.concatStringsSep "/" (lib.tail parts)) allowedErrorPages) then
+      "'_errors/' only accepts upstream's four error pages — use the errorPages options"
+    else
+      "";
+
+  refusedFiles = builtins.filter (e: reservedReason e != "") fileEntries;
 
   # Flattened { handle, key, entry } triples so one bad entry reports its exact
   # location instead of failing with an opaque `mapAttrs` type error.
@@ -51,16 +234,178 @@ let
       handle: lib.mapAttrsToList (key: entry: { inherit handle key entry; })
     ) cfg.secrets.byUser
   );
+
+  # Settings subtrees that contain a dotted attribute NAME. Such a key
+  # type-checks but is inert at runtime — see the assertion below.
+  #
+  # The candidates are the per-GROUP subtrees, not the per-account maps:
+  # `settings.common` and each `settings.byUser.<handle>` are both
+  # `{ <group> = { … }; }`, and it is the inner `<group>` level that can hold
+  # a dotted key. `settings.byUser` as a whole is `{ <handle> = { … }; }`,
+  # whose keys are handles, so it is flattened one level before filtering —
+  # otherwise `lib.filter` would be handed the `byUser` attrset itself.
+  flatDottedSettings =
+    let
+      hasDots = set: builtins.any (name: lib.hasInfix "." name) (builtins.attrNames set);
+      oneLevel = set:
+        builtins.any (name: let v = set.${name}; in builtins.isAttrs v && hasDots v)
+          (builtins.attrNames set);
+      # Every per-account settings map, flattened into the same shape as
+      # `settings.common`.
+      perAccount = lib.attrValues cfg.settings.byUser;
+      candidates = [ cfg.settings.common ] ++ perAccount;
+    in
+    lib.filter (s: hasDots s || oneLevel s) candidates;
+
+  # ── Settings keys that upstream does not have ──────────────────────────────
+  #
+  # `settings.json` is read by DIRECT PROPERTY ACCESS on the client
+  # (`public/script.js`, `public/scripts/power-user.js:1566` —
+  # `Object.assign(power_user, settings.power_user)`). There is no
+  # dotted-path resolver, no schema, and no warning for a key that does not
+  # exist. A key that upstream does not have is therefore inert: it is written
+  # to disk by the seeder, it is merged over the real defaults, it changes
+  # nothing, and the module reports no problem.
+  #
+  # That is exactly the class of failure this file exists for — silently wrong
+  # — and it is a *large* class here, because `settings.common` is a free-form
+  # blob with hundreds of real settings spread over seven subtrees.
+  #
+  # The inventory is derived from upstream's own sources by
+  # `scripts/extract_settings_inventory.mjs` (the same discipline as
+  # `.opencode/skills/nix-coverage/scripts/audit.py` for `config.yaml`): no key
+  # is hardcoded here, and `settingsInventoryFresh` fails the build if the
+  # committed inventory no longer matches the source it was derived from.
+  settingsInventory = builtins.fromJSON (builtins.readFile ../lib/settings-inventory.json);
+
+  # The 24 top-level keys the client writes. A key outside this set is not
+  # merely unknown — it is DROPPED: the client's save payload is a fixed
+  # object (`public/script.js:8068`), so anything the browser does not know
+  # about disappears from `settings.json` at the first UI save.
+  knownTopLevelKeys = settingsInventory.topLevelKeys;
+
+  # Per subtree: the set of real leaf paths, and the paths that are free-form
+  # maps (keyed by persona name, extension name, …) where any leaf is legal.
+  surfaceFields = builtins.mapAttrs (
+    name: surface:
+    builtins.listToAttrs (map (field: { name = field.path; value = field.type; }) surface.fields)
+  ) settingsInventory.surfaces;
+  surfaceOpenPaths = builtins.mapAttrs (name: surface: surface.openPaths) settingsInventory.surfaces;
+
+  # Every leaf declared in `settings.common` and in each
+  # `settings.byUser.<handle>`, with its VALUE, tagged with where it came from
+  # so the message can name the account.
+  settingsLeaves =
+    let
+      entriesOf = attrs: st.leafEntries attrs;
+      maps =
+        [
+          {
+            label = "settings.common";
+            entries = entriesOf cfg.settings.common;
+          }
+        ]
+        ++ lib.mapAttrsToList (
+          handle: attrs: {
+            label = "settings.byUser.${handle}";
+            entries = entriesOf attrs;
+          }
+        ) cfg.settings.byUser;
+    in
+    lib.concatLists (
+      lib.map (map: lib.map (e: map // e) map.entries) maps
+    );
+
+  settingsLeafPaths = lib.map (e: e) settingsLeaves;
+
+  # A leaf is legal when its path is a real upstream field, when it sits
+  # under a free-form map, or when it names an upstream OBJECT (in which case
+  # the value is a nested attrset and the guard is about the children, not
+  # about this path).
+  isKnownPath =
+    surface: path:
+    let
+      fields = surfaceFields.${surface} or { };
+      open = surfaceOpenPaths.${surface} or [ ];
+      underOpen = lib.any (prefix: path == prefix || lib.hasPrefix "${prefix}." path) open;
+      isObjectPath = lib.any (field: lib.hasPrefix "${path}." field) (builtins.attrNames fields);
+    in
+    builtins.hasAttr path fields || underOpen || isObjectPath;
+
+  # ── Types ─────────────────────────────────────────────────────────────────
+  #
+  # A path can be real and still hold the wrong kind of thing, and in
+  # JavaScript that is not always a loud failure:
+  #
+  #   * `power_user.waifuMode = "false"` — a non-empty string is TRUTHY, so
+  #     the setting is ON while the configuration says OFF.
+  #   * `oai_settings.custom_url = 123` — a number where a URL is expected
+  #     breaks the request builder with a type error far from the cause.
+  #
+  # Numbers are the exception: JavaScript coerces them in arithmetic, and
+  # upstream's own UI writes numeric strings in places, so a numeric field
+  # accepts a number or a string.
+  typeOk =
+    expected: value:
+    if expected == "bool" then
+      lib.isBool value
+    else if expected == "str" then
+      lib.isString value
+    else if expected == "array" then
+      lib.isList value
+    else if expected == "int" || expected == "float" then
+      lib.isInt value || lib.isFloat value || lib.isString value
+    else
+      # `unknown` (an upstream constant we could not resolve), `null`, and
+      # object paths have no type to check against.
+      true;
+
+  # Leaves whose value is not the type upstream's own default has.
+  mistypedSettings =
+    lib.filter (
+      e:
+      let
+        parts = lib.splitString "." e.path;
+        surface = lib.head parts;
+        fields = surfaceFields.${surface} or { };
+        relative = lib.concatStringsSep "." (lib.tail parts);
+      in
+      builtins.hasAttr relative fields && !(typeOk fields.${relative} e.value)
+    ) settingsLeaves;
+
+  # Top-level keys the client never writes. These are silently discarded at
+  # the first save, which is worse than unknown: the value *looks* applied.
+  unknownTopLevelKeys =
+    lib.unique (
+      lib.map (p: p.path) (
+        lib.filter (p: !(builtins.elem (lib.head (lib.splitString "." p.path)) knownTopLevelKeys)) settingsLeafPaths
+      )
+    );
+
+  # Leaf paths inside a known subtree that upstream does not have.
+  unknownSettingPaths =
+    lib.unique (
+      lib.map (p: p.path) (
+        lib.filter (
+          p:
+          let
+            parts = lib.splitString "." p.path;
+            surface = lib.head parts;
+          in
+          builtins.hasAttr surface surfaceFields && !(isKnownPath surface (lib.concatStringsSep "." (lib.tail parts)))
+        ) settingsLeafPaths
+      )
+    );
 in
 {
   # Gated on `enable` as a whole, not assertion by assertion.
   #
   # `modules/sillytavern.nix` imports this file UNCONDITIONALLY (it is not
-  # inside `services.nix`'s `mkIf`), so without this every one of the 36
+  # inside `services.nix`'s `mkIf`), so without this every one of the
   # assertions below is evaluated — and can FAIL — with the module switched
   # off. That is not hypothetical: the nixpkgs-collision assertion was written
   # without a guard and blocked a user running nixpkgs' own module who had never
-  # installed ours. Adding a 37th assertion in the same style would reproduce it.
+  # installed ours. Adding another assertion in the same style would reproduce it.
   #
   # `mkIf` around the LIST, not around the import: gating `imports` on `config`
   # is an infinite recursion, because `config` cannot be known until every
@@ -69,6 +414,104 @@ in
   # `config.enableUserAccounts` and friends are not evaluated at all when the
   # module is off, which is the point.
   assertions = lib.mkIf cfg.enable [
+    # ── Flat dotted keys ─────────────────────────────────────────────────────
+    #
+    # A key like `"oai_settings.openai_max_context" = 131072;` type-checks — the
+    # option is `types.attrsOf types.anything`, which accepts any attribute
+    # NAME, dots included. It renders into the seed spec as a flat JSON object
+    # key, the seeder writes it to settings.json verbatim, and the server then
+    # ignores it: settings are read by direct property access
+    # (`public/script.js:7933` — `settings.oai_settings.openai_max_context`),
+    # and there is no dotted-path resolver anywhere in the settings path.
+    #
+    # So it fails completely silently: the key is present in the file, the
+    # module reports no problem, and the value simply never takes effect. That
+    # is the definition of a configuration that is silently wrong.
+    {
+      assertion = flatDottedSettings == [ ];
+      message = ''
+        SillyTavern reads settings.json by direct property access, so a dotted
+        attribute name is silently ignored — the key is written to disk and
+        never read.
+
+        Use a nested attrset instead:
+
+            settings.byUser.seanc = {
+              oai_settings.openai_max_context = 131072;   # WRONG: inert
+              oai_settings = { openai_max_context = 131072; };  # right
+            };
+
+        Offending subtrees: ${builtins.toJSON flatDottedSettings}
+      '';
+    }
+    # ── Settings keys upstream does not have ────────────────────────────────
+    #
+    # Two different failures, in one guard because they share a cause: the
+    # client reads `settings.json` by direct property access, so a key that
+    # upstream does not have is inert — and a key outside the client's own save
+    # payload does not even survive the next save.
+    {
+      assertion = unknownTopLevelKeys == [ ] && unknownSettingPaths == [ ] && mistypedSettings == [ ];
+      message =
+        let
+          straySection =
+            if unknownTopLevelKeys == [ ] then
+              ""
+            else
+              ''
+                These settings.json keys are not among the 24 the client writes, so the browser DISCARDS them at the next save:
+
+                ${lib.concatStringsSep "\n" (map (key: "  - ${key}") unknownTopLevelKeys)}
+
+                A key outside the client's save payload never reaches the UI. Use one of:
+
+                ${lib.concatStringsSep "\n" (map (key: "  - ${key}") knownTopLevelKeys)}
+              '';
+          unknownSection =
+            if unknownSettingPaths == [ ] then
+              ""
+            else
+              ''
+                These settings.json paths are not settings SillyTavern has, so they are written to disk and then ignored:
+
+                ${lib.concatStringsSep "\n" (map (path: "  - ${path}") unknownSettingPaths)}
+
+                The setting names are read by direct property access; a name that does not exist upstream can never take effect. Check the spelling, and see docs/settings-surface.md for the full list of real settings.
+              '';
+          typeSection =
+            if mistypedSettings == [ ] then
+              ""
+            else
+              ''
+                These settings.json values are not the type upstream expects:
+
+                ${lib.concatStringsSep "\n" (
+                  map (
+                    e:
+                    let
+                      parts = lib.splitString "." e.path;
+                      surface = lib.head parts;
+                      relative = lib.concatStringsSep "." (lib.tail parts);
+                    in
+                    "  - ${e.path}: expected ${surfaceFields.${surface}.${relative}}, got ${builtins.typeOf e.value}"
+                  ) mistypedSettings
+                )}
+
+                A string where upstream has a boolean is not a harmless typo: in JavaScript every non-empty string is TRUE, so the setting would be ON while the configuration says OFF.
+              '';
+        in
+        ''
+          services.sillytavern-nixos: a settings.json value is silently wrong.
+
+          The browser reads settings.json by DIRECT PROPERTY ACCESS
+          (`public/scripts/power-user.js:1566`). There is no schema, no
+          dotted-path resolver and no warning, so a name that does not exist, a
+          name the browser does not save, or a value of the wrong kind all fail
+          without a word.
+
+          ${lib.concatStringsSep "\n\n" (lib.filter (s: s != "") [ straySection unknownSection typeSection ])}
+        '';
+    }
     # ── JSON-driven state ─────────────────────────────────────────────────────
     {
       # A `byUser` handle that is not a declared account would be seeded into a
@@ -96,8 +539,25 @@ in
     {
       # A `{ json = …; path = …; }` entry with both, or neither, would fail at
       # activation time with a Python traceback rather than at eval time.
-      assertion = lib.all (f: (f.json != null) != (f.path != null))
-        (lib.attrValues cfg.files.common ++ lib.concatLists (lib.attrValues cfg.files.byUser));
+      #
+      # `fileEntries` rather than the `lib.attrValues … ++ lib.concatLists …`
+      # this used to do. That expression was WRONG and made the module
+      # impossible to evaluate: `lib.attrValues cfg.files.byUser` yields a list
+      # of ATTRSETS (one per handle), and `lib.concatLists` wants a list of
+      # LISTS, so every non-empty `files.byUser` died with
+      #
+      #   error: expected a list but found a set: { "themes/mine.json" = «thunk»; }
+      #
+      # Nothing in the suite ever set `files.byUser`, so it was never forced.
+      # `config.assertions` is reached by `system.build.toplevel`, which is what
+      # `nixos-rebuild switch` builds, so this was not a latent test gap — it
+      # made `files.byUser` unusable in anger: the per-account seeding feature
+      # that docs/options.md documents as
+      # `files.byUser.seanc.themes."Red.json"` failed every rebuild.
+      #
+      # `fileEntries` flattens both maps in one place, so there is no second
+      # spelling of this to get wrong.
+      assertion = lib.all (e: (e.entry.json != null) != (e.entry.path != null)) fileEntries;
       message = ''
         services.sillytavern-nixos: every entry in `files` must set exactly one
         of `json` or `path`.
@@ -108,12 +568,152 @@ in
       '';
     }
     {
+      # A preset name becomes a FILE NAME, so it must not be a path.
+      #
+      # A `/` would put the file in a subdirectory the server never reads, and
+      # `..` would climb out of the account's directory. Neither fails loudly
+      # anywhere: the seeder writes the file, and the dropdown simply does not
+      # show it — the "silently wrong" case this file exists for.
+      assertion = illegalPresetNames == [ ];
+      message = ''
+        services.sillytavern-nixos: these `presets` names cannot be used as
+        file names.
+
+        ${lib.concatStringsSep "\n" (
+          map (e: "  ${e.handle}.${e.bucket}.\"${e.name}\" — would be written to ${e.path}") illegalPresetNames
+        )}
+
+        A preset's name becomes its file name, with `.json` appended, so it
+        must not contain a path separator and must not be `.` or `..`.
+      '';
+    }
+    {
+      # For the buckets whose dropdown label is a `name` field inside the JSON,
+      # the key and the field must agree.
+      #
+      # The module fills the field in from the key when it is MISSING, so a
+      # preset can never appear in the dropdown as "undefined". It cannot fix a
+      # field that is present and wrong — and a wrong one is invisible: the
+      # preset appears in the list under a name that is not the name of the
+      # file it is stored in, so renaming it in the UI creates a second file
+      # and the first one is orphaned.
+      assertion = presetNameMismatches == [ ];
+      message = ''
+        services.sillytavern-nixos: these `presets` entries have a `name` that
+        disagrees with the key they are declared under.
+
+        ${lib.concatStringsSep "\n" (
+          map (e: "  ${e.handle}.${e.bucket}.\"${e.name}\" — the content's `name` is \"${toString e.entry.json.name}\"") presetNameMismatches
+        )}
+
+        For these buckets the dropdown label is the `name` field inside the
+        JSON, not the file name. The module fills that field in from the key
+        when it is missing, so the two only have to be written once — but if
+        they are both written and they disagree, the preset shows up in the
+        list under a name that is not the name of the file it lives in.
+
+        Either drop the `name` field from the content, or make it match the key.
+      '';
+    }
+    {
+      # The same file, declared through both views.
+      #
+      # `presets` and `files` are two views of the same files, so declaring
+      # one file in both is two claims on it — and the merge in
+      # `modules/config.nix` resolves it silently in favour of `files`, so the
+      # `presets` declaration would do nothing at all.
+      assertion = presetFilesCollisions == [ ];
+      message = ''
+        services.sillytavern-nixos: these files are declared through BOTH
+        `presets` and `files`.
+
+        ${lib.concatStringsSep "\n" (
+          map (e: "  ${e.handle}: ${e.path}") presetFilesCollisions
+        )}
+
+        `presets` derives the path from a bucket and a name; `files` states
+        the path outright. They are two views of the same files, so declaring
+        one in both is ambiguous — and the merge would quietly let `files`
+        win, making the `presets` declaration a no-op.
+
+        Keep the `presets` form (it carries the name) or the `files` form (it
+        carries the path), not both.
+      '';
+    }
+    {
+      # A path the seeder refuses at ACTIVATION time takes the whole unit down
+      # with it: it exits 2 as the last command in `preStart`, so `ExecStartPre`
+      # fails and the service never starts — after `nixos-rebuild switch` has
+      # already reported success, and with the entries visited before the bad
+      # one already written. Caught here, where the message can name the path.
+      assertion = refusedFiles == [ ];
+      message = ''
+        services.sillytavern-nixos: these `files` entries name paths the seeder
+        refuses.
+
+        ${lib.concatStringsSep "\n" (
+          map (e: "  ${e.handle}: ${e.path} — ${reservedReason e}") refusedFiles
+        )}
+
+        The seeder refuses them at activation, and because it exits non-zero
+        from the unit's `preStart`, that makes the WHOLE SERVICE fail to start —
+        not just this file. `nixos-rebuild switch` still succeeds, so the
+        failure appears only as a dead service, with a partially seeded data
+        root, until someone reads the journal.
+
+        Reserved filenames: ${lib.concatStringsSep ", " reservedBasenames}
+
+        Reserved at the top level of the account directory: ${lib.concatStringsSep ", " reservedTopLevel}
+
+        `_errors/` accepts only upstream's four pages: ${lib.concatStringsSep ", " allowedErrorPages}
+
+        For `config.yaml` use `services.sillytavern-nixos.cli.configPath`; for
+        `secrets.json` use `secrets.byUser`. For `_errors/*.html` use the
+        `errorPages` options, which take a path and write the file with mode
+        0644 for you.
+      '';
+    }
+    {
+      # `mode` is a 4-digit octal STRING all the way through, because that is
+      # what a Nix string literal carries and because `6440` would otherwise be
+      # silently read as DECIMAL 6440 by `os.chmod`. The seeder raises on
+      # anything that is not exactly four octal digits — but again at
+      # activation, in the same fail-the-unit way. Checked here so a typo is an
+      # eval error naming the file.
+      assertion = lib.all (e: e.entry.mode == null || lib.match "[0-7]{4}" e.entry.mode != null) fileEntries;
+      message = ''
+        services.sillytavern-nixos: every `files` entry `mode` must be a 4-digit
+        octal string such as "0644".
+
+        ${lib.concatStringsSep "\n" (
+          map (e: "  ${e.handle}: ${e.path} — mode = ${lib.strings.toJSON e.entry.mode}")
+            (lib.filter (e: e.entry.mode != null && lib.match "[0-7]{4}" e.entry.mode == null) fileEntries)
+        )}
+
+        The leading zero matters: `mode = "644"` and `mode = "0644"` are the
+        same intent, but only the second is accepted, so that a bare `6440`
+        cannot be read as decimal. Leave `mode` unset for the default, which is
+        0600 — correct for every seeded JSON file, since they sit behind an
+        authenticated per-user router.
+      '';
+    }
+    {
       # Two routes to the same file would race at activation and one would
       # silently win, depending on ordering inside `apply_spec`. `secrets.json`
       # is also the one file whose shape the `secrets` mechanism owns, so a
       # hand-written `files` entry could put it in a shape the server rejects.
-      assertion = lib.all (rel: builtins.baseNameOf rel != "secrets.json")
-        (lib.attrNames cfg.files.common ++ lib.concatLists (lib.attrValues (lib.mapAttrs lib.attrNames cfg.files.byUser)));
+      #
+      # `fileEntries` again. The previous expression was
+      # `lib.concatLists (lib.attrValues (lib.mapAttrs lib.attrNames cfg.files.byUser))`,
+      # which is broken TWICE over: `lib.mapAttrs` calls its function as
+      # `f name value`, so `lib.attrNames` (arity 1) receives the HANDLE NAME
+      # where it expects the attrset, and fails with
+      # `expected a set but found a string: "seanc"`.
+      #
+      # It only ever ran when this assertion was reached, which is why a
+      # non-empty `files.byUser` broke the module rather than this line
+      # obviously being wrong on sight.
+      assertion = lib.all (e: builtins.baseNameOf e.path != "secrets.json") fileEntries;
       message = ''
         services.sillytavern-nixos: do not seed `secrets.json` through `files`.
 
@@ -124,7 +724,7 @@ in
 
         Declared here: ${lib.concatStringsSep ", " (
           lib.filter (rel: builtins.baseNameOf rel == "secrets.json")
-            (lib.attrNames cfg.files.common ++ lib.concatLists (lib.attrValues (lib.mapAttrs lib.attrNames cfg.files.byUser)))
+            (map (e: e.path) (lib.filter (e: builtins.baseNameOf e.path == "secrets.json") fileEntries))
         )}
       '';
     }
@@ -179,6 +779,69 @@ in
         into both is written twice per activation, and the data-root copy lands
         in a directory SillyTavern never reads. This map is fed from
         `customCss` alone precisely so that no configuration can reintroduce it.
+      '';
+    }
+    {
+      # Behind a reverse proxy the `Host` header is the PUBLIC name, so turning
+      # the whitelist on without listing it rejects every request — the server
+      # answers 403 to everything, which reads as "the proxy is broken" rather
+      # than "the host list is empty".
+      #
+      # `hostWhitelist.js:26` reads `req.headers.host` unconditionally.
+      assertion = !(cfg.config.hostWhitelist.enabled && cfg.config.hostWhitelist.hosts == [ ]);
+      message = ''
+        services.sillytavern-nixos: config.hostWhitelist.enabled is true but
+        config.hostWhitelist.hosts is empty.
+
+        `src/middleware/hostWhitelist.js` matches `req.headers.host` against
+        this list, so an empty list rejects EVERY request — including the proxy's
+        own health check. Behind a reverse proxy the header carries the public
+        name, so that name is what has to be listed:
+
+          services.sillytavern-nixos = {
+            config.hostWhitelist.enabled = true;
+            config.hostWhitelist.hosts = [ "st.example.com" ];
+            proxyUpstreams = [ { inherit (config) hosts; /* … */ } ];
+          };
+
+        A leading dot makes a subdomain pattern, matching upstream's own syntax.
+        Leave the whitelist off entirely for a loopback-only instance.
+      '';
+    }
+    {
+      # `enableForwardedWhitelist` defaults TRUE and
+      # `src/express-common.js` prefers `x-real-ip`, then `cf-connecting-ip`,
+      # then the FIRST `x-forwarded-for` entry. An APPENDING proxy therefore lets
+      # a client supply its own `X-Forwarded-For` and choose which address the
+      # whitelist and the rate limiter see.
+      #
+      # Only refused for `append`, which this option can now express. A proxy
+      # that replaces the header (nginx `$remote_addr`) or is loopback-only is
+      # fine as-is.
+      assertion =
+        cfg.proxyUpstreams == [ ]
+        || !(cfg.config.enableForwardedWhitelist
+          && lib.any (u: u.forwardedFor == "append") cfg.proxyUpstreams);
+      message = ''
+        services.sillytavern-nixos: a proxyUpstream sets forwardedFor =
+        "append" while config.enableForwardedWhitelist is true.
+
+        `config.enableForwardedWhitelist` defaults to true, and
+        `src/express-common.js` reads the client-controlled `X-Forwarded-For`
+        when it is set. An APPENDING proxy passes a client's own header through
+        with their chosen address still first, so `whitelist` and
+        `rateLimiting.preferRealIpHeader` then trust a spoofed IP.
+
+        Forward the immediate peer's address instead — `replace`, the default —
+        which is nginx `$remote_addr` (not `$proxy_add_x_forwarded_for`) and
+        Caddy's default behaviour:
+
+          proxyUpstreams = [ { inherit (config) forwardedFor; /* = "replace" */ } ];
+
+        …or record that you meant to trust the chain by turning the server-side
+        switch off:
+
+          config.enableForwardedWhitelist = false;
       '';
     }
     {
