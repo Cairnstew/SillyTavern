@@ -184,6 +184,12 @@ The Home Manager module can write a `sillytavern-login` script, but it needs a
 builds because a login is **two round trips**: you need a CSRF token and a
 session cookie before anything else works.
 
+> The module itself — its namespace (`sillytavern`, not
+> `services.sillytavern`), how it is added to a user's home-manager
+> configuration, and the two things it needs from the system configuration —
+> is covered in
+> [`getting-started.md`](getting-started.md#the-home-manager-half).
+
 ```nix
 sillytavern = {
   enable = true;

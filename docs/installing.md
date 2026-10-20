@@ -3,6 +3,12 @@
 How to get a running instance, and the two decisions (authentication and TLS)
 that will otherwise block you.
 
+> **Start with [`getting-started.md`](getting-started.md)** if you are here to
+> consume the flake: that document covers adding the input, pinning it, the
+> flake's outputs, the module's options and the Home Manager half. This one
+> picks up once the module is imported, and covers what happens to the
+> instance afterwards.
+
 - [Adding the flake](#adding-the-flake)
 - [A minimal configuration](#a-minimal-configuration)
 - [Why a bare `enable = true` will not build](#why-a-bare-enable--true-will-not-build)
@@ -32,6 +38,9 @@ that will otherwise block you.
   };
 }
 ```
+
+The whole of the flake's outputs, how to pin it, and the one trap in the
+version tags are in [`getting-started.md`](getting-started.md#the-outputs).
 
 Then either use the overlay so `pkgs.sillytavern` is this flake's build:
 
@@ -208,7 +217,7 @@ defaults to 1 MB.** Without raising it the first avatar upload fails with a bare
 `413`, and nothing in the SillyTavern journal explains it.
 
 ```nix
-proxyUpstreams = [ { inherit (config) maxBodySize; # = "512m" } ];
+proxyUpstreams = [ { maxBodySize = "512m"; } ];
 ```
 
 **2. The `Host` header.** `config.hostWhitelist.enabled` makes
@@ -233,7 +242,7 @@ replaces by default. Declaring it records the intent, and the module refuses
 `forwardedFor = "append"` while `enableForwardedWhitelist` is on:
 
 ```nix
-proxyUpstreams = [ { inherit (config) forwardedFor; # = "replace" } ];
+proxyUpstreams = [ { forwardedFor = "replace"; } ];
 ```
 
 **4. Read timeout.** Most proxies default to 60 seconds of *inactivity* (nginx
@@ -243,8 +252,14 @@ like the model giving up. Set it above the longest expected gap between tokens �
 it resets on every write, so it does not have to cover the whole response.
 
 ```nix
-proxyUpstreams = [ { inherit (config) readTimeout; # = "1h" } ];
+proxyUpstreams = [ { readTimeout = "1h"; } ];
 ```
+
+> ⚠ **Write the values out; never `inherit (config)` inside
+> `proxyUpstreams`.** An entry that inherits the whole NixOS configuration
+> contains `proxyUpstreams` itself, so evaluating the list evaluates itself
+> and the evaluation never terminates. It does not fail with an error — it
+> hangs, silently, until you interrupt it.
 
 See the `proxyUpstreams` option for the full shape.
 

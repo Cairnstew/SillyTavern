@@ -36,6 +36,10 @@ Nothing else is required: the module supplies its own package, renders
 JSON state at activation, and installs a hardened systemd unit that starts at
 boot.
 
+**[docs/getting-started.md](docs/getting-started.md)** is the full guide:
+pinning, the flake's outputs, the Home Manager half, and the two decisions
+that will otherwise block you.
+
 ## What Nix can drive
 
 | | |
@@ -55,10 +59,14 @@ boot.
 
 ## Documentation
 
-- **[docs/installing.md](docs/installing.md)** — flake and non-flake consumption,
-  TLS, reverse proxying
+- **[docs/getting-started.md](docs/getting-started.md)** — using this as a flake
+  input: adding it, pinning it, the outputs, the module, the Home Manager half
+- **[docs/installing.md](docs/installing.md)** — the decisions that block you:
+  authentication and TLS; where the data lives; reverse proxying
 - **[docs/options.md](docs/options.md)** — the option surface
 - **[docs/users.md](docs/users.md)** — accounts, permissions, scripting a login
+- **[docs/settings-surface.md](docs/settings-surface.md)** — the UI's own
+  settings, and the 410 typed options that cover them
 - **[docs/troubleshooting.md](docs/troubleshooting.md)** — symptoms and causes
 - **[docs/ui-surface.md](docs/ui-surface.md)** — what the front-end reads, and
   what is deliberately not configurable
