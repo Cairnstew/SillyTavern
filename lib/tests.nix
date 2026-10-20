@@ -1121,6 +1121,134 @@ rec {
     in
     offenders;
 
+  # ── Extracting the option surface from upstream's own default/config.yaml ──
+  #
+  # Used by the `libHelpers` check to generate its cases from the real
+  # document, so a key added upstream is covered the next time it runs rather
+  # than needing someone to remember to add a case.
+  #
+  # Two levels only. The module's option surface tracks the shape of the real
+  # document, and the deeper keys follow from their parent; flattening the whole
+  # file would produce hundreds of paths differing only in a leaf nobody sets.
+  configKeyPaths =
+    text:
+    let
+      # lib.splitString, not builtins.split: builtins.split takes a LIST of
+      # separators, so passing "\n" splits on each newline CHARACTER and
+      # yields the empty strings between them.
+      lines = lib.splitString "\n" text;
+
+# builtins.match is a FULL match, hence the trailing `.*`, and it
+              # returns null when it does not match. Blank lines, comments
+              # and list items all return null and are skipped.
+              top = line: builtins.match "^([A-Za-z_][A-Za-z0-9_]*):.*" line;
+              second = line: builtins.match "^  ([A-Za-z_][A-Za-z0-9_]*):.*" line;
+              head1 = m: builtins.head m;
+
+      # One pass, carrying the current top-level key so a second-level name can
+      # be joined to its parent. Comment and list lines match neither pattern
+      # and fall through untouched.
+      walk =
+        lib.foldl'
+          (
+            acc: line:
+            let
+              t = top line;
+              s = second line;
+            in
+            if t != null then
+              {
+                keys = acc.keys ++ [ (head1 t) ];
+                top = head1 t;
+              }
+            else if s != null && acc.top != null then
+              {
+                keys = acc.keys ++ [ "${acc.top}.${head1 s}" ];
+                inherit (acc) top;
+              }
+            else acc
+          )
+          {
+            keys = [ ];
+            top = null;
+          }
+          lines;
+
+      inherit (walk) keys;
+    in
+    keys;
+
+  # ── libHelpers — pins the pure helpers in lib/default.nix ─────────────────
+  #
+  # `lib.keyToEnv` is a deliberate REIMPLEMENTATION of upstream's `keyToEnv`
+  # in src/util.js. Nix cannot import a JS function, so nothing forces the two
+  # to agree: get it wrong and every `SILLYTAVERN_*` override silently stops
+  # taking effect, with no error anywhere and no failed evaluation.
+  #
+  # The two halves are computed by the two languages that own them:
+  #
+  #   * Nix evaluates the real `lib/default.nix` — here, at EVAL time, on the
+  #     host. Not at build time: a build sandbox has no writable
+  #     /nix/var/nix/profiles, so `nix eval` and `nix-instantiate` both fail
+  #     inside one with "Permission denied". Evaluating on the host and
+  #     passing the result in as JSON sidesteps that entirely.
+  #   * Node runs the real `src/util.js` — in the build, where it belongs.
+  #
+  # The cases come from upstream's own default/config.yaml, plus the keys that
+  # are awkward on purpose. `keyToEnv` uppercases and maps '.' to '_' but does
+  # NOT split camelCase, so `enableCorsProxy` becomes SILLYTAVERN_ENABLECORSPROXY
+  # with no underscore. That irregularity is the whole reason the check exists.
+  libHelpers =
+    pkgs:
+    let
+      edgeCases = [
+        "extensions.models.speechToText"
+        "browserLaunch.enabled"
+        "enableCorsProxy"
+        "basicAuthMode"
+        "requestProxyBypass"
+        "logging.accessLog"
+        "unstable_forwardProxyMode"
+        "extensionSettings"
+        "a.b.c.d.e"
+        "already_upper"
+        "with_underscore"
+        "Mixed_Case.Key"
+      ];
+
+      configText = builtins.readFile ../default/config.yaml;
+      keys = lib.unique (configKeyPaths configText ++ edgeCases);
+
+      # The Nix side of the comparison, computed here rather than in the build.
+      nixSide = builtins.listToAttrs (
+        map (key: {
+          name = key;
+          value = st.keyToEnv key;
+        })
+        keys
+      );
+    in
+    pkgs.runCommand "sillytavern-check-lib-helpers"
+      {
+        nativeBuildInputs = [
+          pkgs.nodejs
+          pkgs.python3
+        ];
+      }
+      ''
+        cp ${./test_key_to_env.py} ./test_key_to_env.py
+
+        # Both sides of the comparison, plus the two upstream files the check
+        # reads them from.
+        cp ${pkgs.writeText "key_to_env_from_nix.json" (builtins.toJSON nixSide)} ./key_to_env_from_nix.json
+        cp ${../default/config.yaml} ./config.yaml
+        mkdir -p ./src
+        cp ${../src/util.js} ./src/util.js
+
+        python3 ./test_key_to_env.py
+        touch $out
+      '';
+
   checks =
     pkgs:
     {
@@ -1138,6 +1266,7 @@ rec {
       upstreamCollisionAsserted = upstreamCollisionAsserted pkgs;
       assertionsDisabledCleanly = assertionsDisabledCleanly pkgs;
       noCrossModuleReads = noCrossModuleReads pkgs;
+      libHelpers = libHelpers pkgs;
       seeder = seeder pkgs;
     };
 
