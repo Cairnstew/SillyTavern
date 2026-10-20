@@ -58,6 +58,11 @@ let
 
   # How the UI is reached. `url` is the full override when given, otherwise the
   # scheme/host/port the system config implies.
+  # Hoisted out of `url`'s `else` branch: the login script exports
+  # `SILLYTAVERN_HOST`, and a binding inside a `let` that only one branch of an
+  # `if` can see is not in scope where it is needed.
+  host = if cfg.host != null then cfg.host else "localhost";
+
   url =
     if cfg.url != null then
       cfg.url
@@ -65,7 +70,6 @@ let
       let
         scheme =
           if instance != null && instance.config.ssl.enabled then "https" else "http";
-        host = if cfg.host != null then cfg.host else "localhost";
       in
       "${scheme}://${host}:${toString port}${cfg.path}";
 in
@@ -140,6 +144,22 @@ in
         (see docs/users.md), which is a curl invocation with two round trips. The
         point is that the Nix side records WHICH accounts exist, not how to
         authenticate as them.
+
+        The generated script exports three variables before running it, and
+        those are the whole contract:
+
+          `ACCOUNT`            the chosen account handle
+          `SILLYTAVERN_URL`    the instance base URL, scheme included
+          `SILLYTAVERN_HOST`   just the host[:port]
+
+        Refer to them as SHELL variables (`"$ACCOUNT"`, `"$SILLYTAVERN_URL"`),
+        not as Nix interpolations. A Nix string is evaluated in the CALLER's
+        scope, where those names are not bound, so the Nix spelling fails at
+        evaluation with `undefined variable 'ACCOUNT'`. The same trap catches a
+        half-written version that interpolates the sibling option `url`: a Nix
+        attribute set is not recursive, so the key is not in scope either.
+
+        `loginPackages` supplies whatever binaries the command shells out to.
       '';
     };
 
@@ -149,6 +169,27 @@ in
       description = ''
         Write a `sillytavern-login` script into `home.packages`, which runs
         `loginCommand` for the chosen account. Requires `loginCommand`.
+      '';
+    };
+
+    loginPackages = lib.mkOption {
+      type = lib.types.listOf lib.types.package;
+      # `mktemp`, `cat` and `rm` come from coreutils, which
+      # `writeShellApplication` always puts on PATH.
+      default = with pkgs; [
+        curl
+        jq
+      ];
+      example = "[ pkgs.curl pkgs.jq pkgs.coreutils ]";
+      description = ''
+        Binaries `loginCommand` may invoke, put on the script's PATH.
+
+        A `writeShellApplication` runs under `set -euo pipefail` with a minimal
+        PATH, so without this a `loginCommand` calling `curl` or `jq` fails with
+        "command not found" at the moment you actually try to log in.
+
+        `coreutils` (`mktemp`, `cat`, `rm`, …) is always present and does not
+        need listing.
       '';
     };
   };
@@ -194,6 +235,7 @@ in
       ++ lib.optional (cfg.loginScript && cfg.loginCommand != null) (
         pkgs.writeShellApplication {
           name = "sillytavern-login";
+          runtimeInputs = cfg.loginPackages;
           text = ''
             accounts=(${lib.concatMapStringsSep " " lib.escapeShellArg cfg.accounts})
 
@@ -223,7 +265,14 @@ in
               chosen=''${accounts[$((reply - 1))]}
             fi
 
-            echo "sillytavern-login: logging in as $chosen at ${url}" >&2
+            # The contract `loginCommand` is written against. Exported, not
+            # merely assigned: `$ACCOUNT` has to be visible inside whatever the
+            # command turns out to be.
+            export ACCOUNT="$chosen"
+            export SILLYTAVERN_URL="${url}"
+            export SILLYTAVERN_HOST="${host}"
+
+            echo "sillytavern-login: logging in as $ACCOUNT at $SILLYTAVERN_URL" >&2
             ${cfg.loginCommand}
           '';
         }
