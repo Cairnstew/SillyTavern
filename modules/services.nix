@@ -192,11 +192,7 @@ let
       )
     );
 
-  userArgs = lib.concatStringsSep " " (lib.mapAttrsToList mkUserArg resolvedUsers);
-
-  # Fully-formed `--user SPEC` arguments, one per declared account.
-  #
-  # `mkUserArg` ALREADY shell-escapes its result, so these must not be escaped a
+  # `mkUserArg` ALREADY shell-escapes each result, so these must not be escaped a
   # second time: doing so hands the script a literal `'handle` and it rejects the
   # key with "unknown --user key".
   userSpecs = lib.attrValues (lib.mapAttrs mkUserArg resolvedUsers);
@@ -287,10 +283,18 @@ in
       description = "SillyTavern LLM front-end and proxy server";
       documentation = [
         "https://docs.sillytavern.app/"
-        "https://github.com/Cairnstew/nixos-sillytavern"
+        "https://github.com/Cairnstew/SillyTavern"
       ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
+      # Without this the unit is ordered after `network-online.target` but
+      # nothing ever PULLS IT IN, so it never starts at boot and `systemctl
+      # status sillytavern` reports "inactive (dead)" on a freshly booted host
+      # with no error anywhere. `enable = true` is understood to mean "runs".
+      #
+      # `multi-user.target`, matching every other NixOS service. The two sibling
+      # units in this file set the same thing for themselves.
+      wantedBy = [ "multi-user.target" ];
 
       serviceConfig = {
         # `Type`, not `systemd.services.<name>.type`: it is a serviceConfig key.
@@ -394,7 +398,13 @@ in
         # `NODE_OPTIONS` is deliberately NOT set: heap sizing is left to
         # systemd's memory caps rather than to a flag that has to be kept in sync
         # with `hardware.memoryMax`.
-      } // hardwareConfig;
+      }
+      # hardwareConfig, then the consumer's `systemdOverrides.serviceConfig`,
+      # so an override ADDS to or REPLACES individual directives rather than
+      # replacing the whole block. See the note on the `//` at the end of this
+      # unit for the trap this avoids.
+      // hardwareConfig
+      // (cfg.systemdOverrides.serviceConfig or { });
 
       # `environment`, not `serviceConfig.Environment`.
       # NixOS' systemd module declares the unit-level `environment` as an
@@ -429,7 +439,36 @@ in
       preStart = preStart;
 
       restartTriggers = [ "sillytavern-package.path" ] ++ cfg.restartTriggers;
-    } // cfg.systemdOverrides;
+    }
+
+    # `cfg.systemdOverrides`, with `serviceConfig` removed and merged into the
+    # serviceConfig above instead.
+    #
+    # It used to be a plain `// cfg.systemdOverrides` on the whole unit. That
+    # is a trap with a very small diff and a very large blast radius, because
+    # attrset `//` REPLACES rather than merges: the moment a consumer set
+    # `systemdOverrides.serviceConfig.ReadWritePaths`, the entire serviceConfig
+    # above it was discarded and rebuilt from that one key alone. Verified
+    # live, using the example this project itself documents:
+    #
+    #   systemdOverrides = { serviceConfig.ReadWritePaths = [ "/tmp/x" ]; };
+    #   -> serviceConfig keys: [ "ExecStartPre" "ReadWritePaths" ]
+    #
+    # which is a unit with no `ExecStart` (so it never starts), no `User` or
+    # `Group` (so it would run as root if it did), no `StateDirectory` (so the
+    # data root is never created, and `ProtectSystem=strict` would leave it
+    # unwritable), and none of the hardening block. `nixos-rebuild` stays green
+    # throughout; the failure surfaces only as a dead service after a switch.
+    #
+    # So `serviceConfig` is merged explicitly, the override winning per key,
+    # and everything else is still a plain shallow `//`, which is right for
+    # scalar unit options like `description` and `restartTriggers`.
+    #
+    # Consequence worth knowing: a consumer CANNOT remove a directive this
+    # module sets (systemd has no "unset" for `Type=simple`), only change it.
+    # Setting it to `""` is the usual escape hatch and renders as `Type=`,
+    # which systemd ignores.
+    // lib.removeAttrs cfg.systemdOverrides [ "serviceConfig" ];
 
     # A trivial unit whose only job is to exist, so `RestartTrigger` has
     # something stable to name and so the package is pulled in when the main
@@ -485,6 +524,40 @@ in
         AccuracySec = "5s";
       };
     };
+
+    # ── access.log rotation ───────────────────────────────────────────────────
+    #
+    # `logging.enableAccessLog` defaults to TRUE and writes to
+    # `<dataRoot>/access.log`, which `StateDirectory` makes writable — so the
+    # option works, and the file grows without bound on a busy instance. There
+    # was no logrotate configuration and no tmpfiles rule anywhere in the tree,
+    # which on a long-lived server is a slow disk leak nobody thinks about.
+    #
+    # A tmpfiles rule is the right primitive rather than logrotate: the file
+    # lives under `/var/lib`, which is exactly what `systemd-tmpfiles` manages,
+    # and it needs no timer, no copytruncate dance, and no extra package on the
+    # closure. SillyTavern holds the file open in append mode
+    # (`src/middleware/accessLogWriter.js`), and `z` rotation renames rather
+    # than truncates, so the server keeps writing to the renamed inode until it
+    # restarts — which is fine, because the NEXT file is fresh.
+    #
+    # `z path mode user group age count`: keep up to 30 rotations, each no older
+    # than 30 days, and stop rotating past that. `0644` because every entry is a
+    # connection's source address, and `sillytavern:sillytavern` rather than the
+    # configured `user`/`group` because systemd-tmpfiles runs as root before any
+    # user exists — the names, not the ids, are what it needs.
+    #
+    # Gated on the log actually being enabled, so disabling it does not leave a
+    # rule behind for a file that will never exist.
+    systemd.tmpfiles.rules =
+      #
+      # `lib.optional COND "rule"`, NOT `lib.optional COND [ "rule" ]`.
+      # `lib.optional` already wraps its element in a list, so passing a list
+      # yields `[[ "rule" ]]` — one entry that is a list, which this
+      # `types.listOf types.str` option rejects with
+      # `not of type 'string'` naming entry 1.
+      lib.optional (cfg.config.logging.enableAccessLog)
+        "z ${cfg.dataRoot}/access.log 0644 sillytavern sillytavern 30d 1024";
 
     # ── Firewall ──────────────────────────────────────────────────────────────
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.config.port ];

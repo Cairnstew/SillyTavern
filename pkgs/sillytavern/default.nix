@@ -46,7 +46,7 @@
 #     sandbox and be overwritten on the first real start anyway.
 #
 # The consequence for operators is that startup is not instant, which the
-# module surfaces as `services.sillytavern.startupTimeout` and, if
+# module surfaces as `services.sillytavern-nixos.startupTimeout` and, if
 # `config.heartbeatInterval` is non-zero, as a working systemd healthcheck via
 # `src/healthcheck.js`.
 {
@@ -239,7 +239,7 @@ let
               echo "  It resolves config and data through XDG directories, ignoring" >&2
               echo "  --configPath and --dataRoot, so the data root cannot be a" >&2
               echo "  systemd StateDirectory." >&2
-              echo "  Use services.sillytavern, or invoke the store path directly." >&2
+              echo "  Use services.sillytavern-nixos, or invoke the store path directly." >&2
               exit 2
               ;;
           esac
@@ -293,7 +293,7 @@ let
         if [ -z "''${SILLYTAVERN_HEARTBEATINTERVAL:-}" ]; then
           echo "sillytavern-healthcheck: SILLYTAVERN_HEARTBEATINTERVAL is not set." >&2
           echo "  Without it the probe exits 0 unconditionally. Set" >&2
-          echo "  services.sillytavern.config.heartbeatInterval > 0." >&2
+          echo "  services.sillytavern-nixos.config.heartbeatInterval > 0." >&2
           exit 1
         fi
 
@@ -407,8 +407,9 @@ stdenvNoCC.mkDerivation {
   # not be able to do by accident either.
   passthru = {
     inherit source nodeModules launcher healthcheck;
-    # The server's own version, which is what `/api/ping` reports and what the
-    # module's assertion about the package version checks against.
+    # The server's own version, which is what `/api/ping` reports. Exposed so a
+    # consumer can assert their own configuration against it; this module makes
+    # no version assertion of its own.
     appVersion = version;
   };
 
@@ -423,7 +424,7 @@ stdenvNoCC.mkDerivation {
 
       This package is the server as it ships, built from this repository's
       source with `npm ci --omit=dev --ignore-scripts` against the committed
-      lockfile. It is intended to be run by the `services.sillytavern` NixOS
+      lockfile. It is intended to be run by the `services.sillytavern-nixos` NixOS
       module in this flake, which supplies the config file, the data root and
       the systemd unit.
     '';
