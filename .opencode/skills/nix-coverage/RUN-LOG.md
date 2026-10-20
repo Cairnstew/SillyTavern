@@ -706,3 +706,85 @@ compares them with the module's own table. Mutating one directory name in
 The check is only worth anything if it was seen to fail, so it was mutated
 twice — a directory name, and one API id dropped from the label-from-content
 list. Both failed with a message that said what differed.
+
+---
+
+## 2026-10-19 — the git workflow around the audit; three traps, one of them expensive
+
+These came from shipping the audit's own work (the settings tree, the preset
+buckets, the source unification) as a six-commit series.
+
+### `nix fmt` does not exist in this repository, and "fixing" it rewrites the tree
+
+`nix fmt` fails here:
+
+```
+error: flake 'git+file:///home/seanc/Projects/SillyTavern' does not provide attribute 'formatter.x86_64-linux'
+```
+
+That is deliberate: `flake.nix:206-212` says the flake has no Nix formatter
+because the tree is not formatted with one, and `justfile:288-290` says
+formatting is "opt-in, never a gate" and that the first `alejandra` run would
+be "a large diff".
+
+A generic "run `nix fmt` before committing" instruction therefore fails, and
+the obvious repair — running `nixpkgs-fmt`/`alejandra` over the changed files
+— rewrites **12 of the 16** changed `.nix` files, including files this series
+never touched (`pkgs/sillytavern/filter.nix` was already unformatted before
+it). That diff is not the work; it is noise added to a review.
+
+**Rule:** in this repository, formatting Nix is not a gate. The gate is
+`nix flake check`. Verify the tree's formatting state with
+`nixpkgs-fmt --check <files>` and REPORT it; do not "fix" it unless the
+change you are making is the formatting.
+
+### `git ls-files -i` alone is an error, and this repo's answer to it is upstream's
+
+The obvious stale-tracking audit is `git ls-files -i --exclude-standard`, and
+it exits non-zero:
+
+```
+fatal: ls-files -i must be used with either -o or -c
+```
+
+The working form is `git ls-files -i -c --exclude-standard` (`-c` = consider
+*tracked* files).
+
+Run here, it reports seven files: `.vscode/settings.json`,
+`backups/!README.md`, `data/.gitkeep`, `default/scaffold/README.md`,
+`plugins/.gitkeep`, `plugins/package.json`,
+`public/scripts/extensions/third-party/.gitkeep`. **Do not `git rm --cached`
+them.** They are upstream SillyTavern's own exceptions — upstream's
+`.gitignore` ignores `/backups/` (line 40), `/plugins/` (51) and `/data`
+(52) while the repository still ships a README, a `.gitkeep` and a
+`package.json` in each, and `git log` shows every one of them arriving from
+an upstream commit. Untracking them would delete files the application
+ships, and would make the fork diverge from upstream on every rebase.
+
+**Rule:** an ignored-but-tracked file is only stale if THIS repository
+tracked it. Check `git log -1 -- <file>` and `git cat-file -e
+origin/release:<file>` before removing anything from tracking.
+
+### Never overwrite a worktree file in place; two recovery routes exist, and you will need one
+
+While splitting a 1476-line diff into per-commit hunks, a helper script
+rewrote `lib/tests.nix` from a reconstructed base and **overwrote the
+working file** with a 127-line-shorter revision. The original was not in the
+index, not in a stash, and not in any ref — `git reflog --all` had nothing.
+
+Two recovery routes, in the order worth trying:
+
+1. **Opencode's snapshot store** —
+   `~/.local/share/opencode/snapshot/<session-hash>/<git-dir>/` is a bare git
+   repository of file snapshots. `git --git-dir=<dir> cat-file --batch-all-objects --batch-check`
+   lists the blobs; match on size, then `cat-file -p <sha>` to read one.
+   This is what recovered the file.
+2. **The session database** — `~/.local/share/opencode/opencode.db`, table
+   `part`, column `data` holds JSON with the tool calls and their outputs.
+   `select id, length(data) from part where data like '%<a distinctive line>%'`
+   finds the session that made the change.
+
+**Rule:** copy the file to a temporary path BEFORE rewriting it, and compare
+`git diff --numstat` against the numbers you had before the rewrite. A
+silently shorter file is the failure mode, not an error message: `git diff`
+still succeeded, and the only symptom was a changed line count.
