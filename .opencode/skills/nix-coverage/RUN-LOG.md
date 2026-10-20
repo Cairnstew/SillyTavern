@@ -788,3 +788,67 @@ Two recovery routes, in the order worth trying:
 `git diff --numstat` against the numbers you had before the rewrite. A
 silently shorter file is the failure mode, not an error message: `git diff`
 still succeeded, and the only symptom was a changed line count.
+
+---
+
+## 2026-10-20 — writing the consumer guide; the documentation is not covered by any check
+
+The task was documentation, and the lesson is that **a documentation example is
+code that nothing evaluates**. `audit.py` covers `config.yaml`, the CLI flags
+and the `settings.json` surface; it says nothing about the snippets in
+`docs/`, and neither does `nix flake check`. Two of the examples written for
+`docs/getting-started.md` were wrong on the first attempt, and the only reason
+either was caught is that the guide was written against a throwaway consumer
+flake (`path:` input, `nixosSystem`, `nix eval` of the option that the
+example sets).
+
+### `customCss` is a PATH, and a string is accepted until it is not
+
+`modules/options.nix:2537` declares `customCss` as `types.nullOr types.path`.
+The example `customCss = ".foo { color: red; }";` **evaluates** — a string that
+is a valid relative path is a valid path — and then fails at BUILD time,
+because the derivation tries to copy a file called `.foo { color: red; }` that
+does not exist. A consumer reads the doc, pastes the example, gets a green
+`nixos-rebuild` and a broken activation.
+
+**Rule:** an option's TYPE is not the same as its example. `types.path` is
+where a doc example most often lies, because the wrong value is accepted
+until the copy.
+
+### `inherit (config)` inside `proxyUpstreams` HANGS the evaluation
+
+This is the worst failure mode found so far, and it was in
+`docs/installing.md` — three snippets, in the section about the four settings
+a proxy gets wrong:
+
+```nix
+proxyUpstreams = [ { inherit (config) maxBodySize; # = "512m" } ];
+```
+
+`config` is the whole NixOS configuration, and the configuration contains
+`proxyUpstreams`, so evaluating the list evaluates itself. The evaluation does
+not diverge with an error — it **never terminates**: no output, no message,
+just a `nix eval` that runs until it is interrupted. (Reproduced: a
+`nix eval` of `config.services.sillytavern-nixos.proxyUpstreams` had to be
+killed after fifteen minutes.)
+
+The submodule at `modules/options.nix:3152` declares `name`, `port`, `path`,
+`stripPrefix`, `displayName`, `hosts`, `maxBodySize`, `forwardedFor` and
+`readTimeout` — and no `config`. The value has to be written out:
+
+```nix
+proxyUpstreams = [ { maxBodySize = "512m"; readTimeout = "1h"; } ];
+```
+
+**Rule:** an option that takes a LIST OF ATTRSETS is a place where
+`inherit (config)` is a self-reference, not a shortcut. The exported helper
+`lib.mkProxyUpstream` (`lib/default.nix:802`) takes `config` as an ARGUMENT
+and reads `config.services.sillytavern-nixos.config.port` out of it — that is
+the safe way to get the port, because the helper is a function, not a value
+the configuration contains.
+
+**Follow-up worth doing:** the module cannot detect this, and a hang is the
+one failure mode a user cannot diagnose from a log. `scripts/eval-assertions.nix`
+is the right shape for the check — evaluate the configuration and report the
+assertion failures — but nothing in the suite passes a self-referential
+`proxyUpstreams` through it.
