@@ -138,6 +138,29 @@ let
       extensions =
         mergedConfig.extensions // {
           autoUpdate = if mergedConfig.extensions.autoUpdate && cfg.extensions != { } then false else mergedConfig.extensions.autoUpdate;
+
+          # ── models.autoDownload: off when the model cache is read-only ──────
+          #
+          # `models.directory` may be a STORE PATH — a directory of weights
+          # that is part of the Nix closure. transformers.js downloads a model
+          # it cannot find INTO the cache directory, so a read-only cache
+          # turns "the model is not there" into an EROFS write error, which
+          # surfaces as a failed request with a stack trace instead of "file
+          # not found locally".
+          #
+          # Forcing it off makes that failure mode explicit, and it is the
+          # honest setting anyway: a model set defined in Nix does not want a
+          # runtime download quietly changing it.
+          #
+          # `models.byId` alone does NOT force it off. Those weights live in
+          # the PACKAGE, and the cache directory is still the writable data
+          # root, so downloading an extra model into it remains possible and
+          # remains useful.
+          models =
+            mergedConfig.extensions.models // {
+              autoDownload =
+                if modelCacheReadOnly then false else mergedConfig.extensions.models.autoDownload;
+            };
         };
 
       enableServerPluginsAutoUpdate =
@@ -332,8 +355,70 @@ let
             cp -r --no-preserve=mode,ownership,timestamps ${mkGitPackage spec}/. "$out/public/scripts/extensions/third-party/${name}/"
           '') cfg.extensions
         )}
+        ${concatStringsSep "\n" (
+          mapAttrsToList (id: path: ''
+            echo "sillytavern: installing model ${id} -> node_modules/sillytavern-transformers/models/${id}"
+            mkdir -p "$out/node_modules/sillytavern-transformers/models/${modelParent id}"
+            ln -sfn ${path} "$out/node_modules/sillytavern-transformers/models/${id}"
+          '') cfg.models.byId
+        )}
       '';
     });
+
+  # ── Locally-run models ──────────────────────────────────────────────────────
+  #
+  # The models SillyTavern runs itself are the transformers.js ONNX weights
+  # behind the extensions. transformers.js looks for a model file in TWO
+  # places, in this order (`src/utils/hub.js` in the `sillytavern-transformers`
+  # package):
+  #
+  #   1. the FS cache   — `<cache_dir>/<model-id>/<file>`
+  #   2. the local path — `<localModelPath>/<model-id>/<file>`
+  #
+  # and `localModelPath` is `<the transformers.js package>/models/` — INSIDE
+  # the package. In a Nix build the package is a read-only store path, and a
+  # store path can hold a model just as well as a data directory can: the
+  # weights become part of the package's closure, content-addressed and
+  # garbage collected with it.
+  #
+  # So `models.byId` is installed into the package, and `models.directory` —
+  # for weights that live outside Nix — is wired to the FS cache instead (see
+  # modules/services.nix).
+  #
+  # The model id is the key upstream's `config.extensions.models.*` options
+  # take, and it becomes a PATH under `models/`, so it may contain a slash
+  # ("Xenova/whisper-small") and every component of it must be a plain name —
+  # modules/assertions.nix checks that, because a key that escaped the
+  # directory would put a model somewhere the server never looks.
+  #
+  # The parent directory of each model id, as a path relative to the
+  # transformers.js `models/` directory: "Xenova/whisper-small" -> "Xenova",
+  # "gpt2" -> "" (no parent to create).
+  #
+  # `lib.splitString` rather than `builtins.dirOf`, which does not accept a
+  # string with a trailing component the way it does a path.
+  modelParent =
+    id:
+    let
+      parts = lib.splitString "/" id;
+      parents = if parts == [ ] then [ ] else lib.init parts;
+    in
+    lib.concatStringsSep "/" parents;
+
+  # The directory the server will look for model weights in, and whether it
+  # can be written to.
+  #
+  # `null` means upstream's own behaviour: `<dataRoot>/_cache`, a real
+  # directory inside the state directory, created by the server on first start
+  # and filled by transformers.js as it downloads models.
+  modelCacheDir = cfg.models.directory;
+
+  # A store path is read-only. transformers.js downloads a model it cannot
+  # find INTO the cache directory, so a read-only cache turns "the model is
+  # not there" into an EROFS write error — a failed request with a stack
+  # trace, rather than the clear "file not found locally".
+  modelCacheReadOnly =
+    modelCacheDir != null && lib.hasPrefix "/nix/store" (toString modelCacheDir);
 
   # ── The command line ────────────────────────────────────────────────────────
   #
@@ -756,6 +841,11 @@ services.sillytavern-nixos.internal = {
   healthcheckEnv = healthcheckEnv;
   seedSpec = seedSpec;
   seedSpecJson = seedSpecJson;
+
+  # The model cache directory the server will use, or null for upstream's own
+  # `<dataRoot>/_cache`. Read by modules/services.nix, which points the cache
+  # at it before the server starts.
+  modelCacheDir = modelCacheDir;
 };
 
     # An absolute `ssl.certPath` / `ssl.keyPath` pointing into the store paths

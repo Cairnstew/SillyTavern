@@ -8,7 +8,7 @@
       "nai_settings <- public/scripts/nai-settings.js",
       "horde_settings <- public/scripts/horde.js",
       "world_info_settings <- public/scripts/world-info.js",
-      "textgenerationwebui_settings <- default/content/presets/textgen/*.json"
+      "textgenerationwebui_settings <- default/content/presets/textgen/*.json + public/scripts/textgen-settings.js"
     ]
   },
   "topLevelKeys": [
@@ -2144,7 +2144,7 @@
       ]
     },
     "textgenerationwebui_settings": {
-      "file": "default/content/presets/textgen/*.json",
+      "file": "default/content/presets/textgen/*.json + public/scripts/textgen-settings.js",
       "fields": [
         {
           "path": "temp",
@@ -2506,9 +2506,157 @@
           "path": "rep_pen_size",
           "type": "int",
           "value": 0
+        },
+        {
+          "path": "max_tokens_second",
+          "type": "int",
+          "value": 0
+        },
+        {
+          "path": "seed",
+          "type": "int",
+          "value": -1
+        },
+        {
+          "path": "preset",
+          "type": "str",
+          "value": "Default"
+        },
+        {
+          "path": "stopping_strings",
+          "type": "array",
+          "value": []
+        },
+        {
+          "path": "include_reasoning",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "streaming",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "global_banned_tokens",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "send_banned_tokens",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "type",
+          "type": "str",
+          "value": "ooba"
+        },
+        {
+          "path": "mancer_model",
+          "type": "str",
+          "value": "mytholite"
+        },
+        {
+          "path": "togetherai_model",
+          "type": "str",
+          "value": "Gryphe/MythoMax-L2-13b"
+        },
+        {
+          "path": "infermaticai_model",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "ollama_model",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "openrouter_model",
+          "type": "str",
+          "value": "openrouter/auto"
+        },
+        {
+          "path": "openrouter_providers",
+          "type": "array",
+          "value": []
+        },
+        {
+          "path": "openrouter_quantizations",
+          "type": "array",
+          "value": []
+        },
+        {
+          "path": "vllm_model",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "aphrodite_model",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "dreamgen_model",
+          "type": "str",
+          "value": "lucid-v1-extra-large/text"
+        },
+        {
+          "path": "tabby_model",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "llamacpp_model",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "n",
+          "type": "int",
+          "value": 1
+        },
+        {
+          "path": "custom_model",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "bypass_status_check",
+          "type": "bool",
+          "value": false
+        },
+        {
+          "path": "openrouter_allow_fallbacks",
+          "type": "bool",
+          "value": true
+        },
+        {
+          "path": "featherless_model",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "generic_model",
+          "type": "str",
+          "value": ""
+        },
+        {
+          "path": "adaptive_target",
+          "type": "float",
+          "value": -0.01
+        },
+        {
+          "path": "adaptive_decay",
+          "type": "float",
+          "value": 0.9
         }
       ],
-      "openPaths": []
+      "openPaths": [
+        "extensions",
+        "server_urls"
+      ]
     }
   }
 }

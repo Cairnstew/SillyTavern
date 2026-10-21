@@ -628,6 +628,10 @@ rec {
         # confinement, secrets.json — had passing tests that CI never ran.
         python3 test_seed_users.py
         python3 test_seed_files.py
+        # The model-cache linker, which decides what `<dataRoot>/_cache` is.
+        # Its interesting behaviour is DATA LOSS if it breaks — an existing
+        # cache of downloaded models must be moved aside, never deleted.
+        python3 test_link_models.py
         touch "$out"
       '';
 
@@ -837,6 +841,36 @@ rec {
             };
           };
           expect = "the browser DISCARDS them";
+        }
+        {
+          name = "data-root-outside-the-state-directory";
+          module = {
+            services.sillytavern-nixos = withConfig {
+              dataRoot = "/var/lib/somewhere-else";
+            };
+          };
+          # The parentheses are ESCAPED: the needle is used as a regular
+          # expression, and an unescaped "(" is a group, so the pattern would
+          # ask for a message with no parentheses in it — and match nothing.
+          expect = "dataRoot \\(/var/lib/somewhere-else\\) is not";
+        }
+        {
+          name = "model-id-that-is-not-a-path";
+          module = {
+            services.sillytavern-nixos = withConfig {
+              models.byId."../escape" = pkgs.writeTextDir "config.json" "{}";
+            };
+          };
+          expect = "is not a usable model id";
+        }
+        {
+          name = "model-weights-outside-the-store";
+          module = {
+            services.sillytavern-nixos = withConfig {
+              models.byId."Xenova/whisper-small" = "/var/lib/models/whisper-small";
+            };
+          };
+          expect = "are not store paths";
         }
       ];
 
@@ -2513,6 +2547,137 @@ rec {
         touch "$out"
       '';
 
+  # ── Locally-run models ─────────────────────────────────────────────────────
+  #
+  # SillyTavern runs SOME models itself — the transformers.js ONNX weights
+  # behind the extensions — and upstream fetches them from HuggingFace on
+  # first use into `<dataRoot>/_cache`, a path it hardcodes
+  # (`src/transformers.js:134`).
+  #
+  # The module gives that path two ways out, and this check proves the
+  # load-bearing one actually happened: a model declared in `models.byId` is
+  # INSTALLED INTO THE PACKAGE, at the path transformers.js searches second
+  # (`localModelPath`, `src/env.js` in the `sillytavern-transformers`
+  # package):
+  #
+  #   <package>/node_modules/sillytavern-transformers/models/<model id>/
+  #
+  # which is `<package>/node_modules/sillytavern-transformers/models/` — the
+  # package's own directory, so the weights are in the store, in the package's
+  # closure, and garbage collected with it.
+  #
+  # This check reads the BUILT package, because the whole point is that the
+  # file is where transformers.js will look: an option that renders but does
+  # not install would leave the server downloading the model at runtime, into a
+  # directory the operator did not choose.
+  modelsByIdInstalled =
+    pkgs:
+    let
+      # A stand-in for a model: one file, in the layout transformers.js asks
+      # for. The real thing is hundreds of MiB of ONNX weights, and the check
+      # is about WHERE the file lands, not what is in it.
+      model = pkgs.writeTextDir "config.json" "{}";
+
+      system = evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          models.byId."Xenova/whisper-small" = model;
+        };
+      };
+      packaged = system.config.services.sillytavern-nixos.internal.packaged;
+    in
+    pkgs.runCommand "sillytavern-check-models-installed"
+      {
+        nativeBuildInputs = [
+          pkgs.coreutils
+        ];
+      }
+      ''
+        fail() {
+          echo "FAIL models-installed: $1" >&2
+          exit 1
+        }
+
+        link="${packaged}/node_modules/sillytavern-transformers/models/Xenova/whisper-small"
+
+        # A SYMLINK, not a copy: the weights stay one store path, and the
+        # package's closure says so.
+        [ -L "$link" ] || fail "$link is not a symlink"
+        [ "$(readlink "$link")" = "${model}" ] \
+          || fail "$link points at $(readlink "$link"), expected ${model}"
+
+        # And it is readable THROUGH the link, which is how transformers.js
+        # will read it.
+        [ -f "$link/config.json" ] || fail "$link/config.json is not readable"
+
+        echo "PASS models-installed (a Nix-declared model is installed in the package)"
+        touch "$out"
+      '';
+
+  # The model's DATA DIRECTORY, and the one thing that must follow from it.
+  #
+  # `models.directory` points upstream's hardcoded cache path
+  # (`<dataRoot>/_cache`) at a directory the operator chose. If that directory
+  # is a STORE PATH it cannot be written to, and transformers.js downloads a
+  # model it cannot find INTO the cache — so a read-only cache turns "the
+  # model is not there" into an EROFS write error. The module forces
+  # `extensions.models.autoDownload` off in that case, which turns it into the
+  # clear "file not found locally".
+  #
+  # And the wiring has to be REAL: the unit's preStart has to run the linker
+  # with the right target, or the cache is never pointed anywhere and the
+  # option does nothing.
+  modelDirectoryWiring =
+    pkgs:
+    let
+      # A store path: read-only, so `autoDownload` must be forced off.
+      storeDirectory = pkgs.writeTextDir "Xenova/whisper-small/config.json" "{}";
+
+      # A plain path: writable, so downloads must still be allowed — and the
+      # literal string can be searched for in the unit (a STORE PATH cannot:
+      # Nix refuses to put one in a regular expression, which is what
+      # `lib.hasInfix` uses).
+      plainDirectory = "/var/lib/sillytavern-models";
+
+      withStore = evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          models.directory = storeDirectory;
+        };
+      };
+      withPlain = evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          models.directory = plainDirectory;
+        };
+      };
+      withoutModels = evalSystem pkgs { services.sillytavern-nixos.enable = true; };
+
+      storeCfg = withStore.config.services.sillytavern-nixos;
+      plainCfg = withPlain.config.services.sillytavern-nixos;
+      plainPreStart = withPlain.config.systemd.services.sillytavern.preStart;
+    in
+    # The cache directory is handed to the unit, not merely remembered.
+    assert storeCfg.internal.modelCacheDir == storeDirectory;
+    # And a read-only cache turns autoDownload off.
+    assert storeCfg.internal.effectiveConfig.extensions.models.autoDownload == false;
+    # A writable one does not: the server can still download a model it does
+    # not find locally.
+    assert plainCfg.internal.effectiveConfig.extensions.models.autoDownload == true;
+    # Without a directory at all, upstream's own value stands — the rendered
+    # config.yaml must stay a faithful copy of upstream's document.
+    assert withoutModels.config.services.sillytavern-nixos.internal.effectiveConfig.extensions.models.autoDownload == true;
+    # The linker runs before the server, with the target.
+    assert lib.hasInfix "st_link_models.py" withStore.config.systemd.services.sillytavern.preStart;
+    assert lib.hasInfix plainDirectory plainPreStart;
+    # And it does NOT run when there is nothing to point at.
+    assert !(lib.hasInfix "st_link_models.py" withoutModels.config.systemd.services.sillytavern.preStart);
+    pkgs.runCommand "sillytavern-check-model-directory-wiring" { }
+      ''
+        echo "PASS model-directory-wiring (the cache is pointed at the configured directory)"
+        touch "$out"
+      '';
+
   # ── llama.cpp server ───────────────────────────────────────────────────────
   #
   # The backend is a separate module, so these evaluate it WITHOUT the
@@ -2946,6 +3111,8 @@ rec {
       presetsRendered = presetsRendered pkgs;
       hardeningPinned = hardeningPinned pkgs;
       libHelpers = libHelpers pkgs;
+      modelsByIdInstalled = modelsByIdInstalled pkgs;
+      modelDirectoryWiring = modelDirectoryWiring pkgs;
       llamaPresetRendered = llamaPresetRendered pkgs;
       llamaAssertions = llamaAssertions pkgs;
       modelLayersPrecedence = modelLayersPrecedence pkgs;
@@ -2954,7 +3121,8 @@ rec {
       modelLayersCharacterNames = modelLayersCharacterNames pkgs;
       modelLayersContextSize = modelLayersContextSize pkgs;
       modelLayersContextMatchesBackend = modelLayersContextMatchesBackend pkgs;
-      llamaCudaVariantAvailable = llamaCudaVariantAvailable pkgs;    };
+      llamaCudaVariantAvailable = llamaCudaVariantAvailable pkgs;
+    };
 
   packages = pkgs: { };
 }

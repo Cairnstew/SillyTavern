@@ -249,6 +249,24 @@ services.sillytavern-nixos = {
   # The instance-wide stylesheet. A PATH to a CSS file, not a string.
   customCss = ./ui-overrides.css;
 
+  # A local inference server. SillyTavern does not run the model — it talks
+  # to the server that does. `server_urls` is keyed by backend.
+  settingsExtra.textGenerationSettings = {
+    type = "ollama";
+    server_urls.ollama = "http://127.0.0.1:11434";
+    ollama_model = "llama3.1:8b";
+  };
+
+  # The models SillyTavern runs ITSELF — the ONNX weights behind the
+  # extensions — in the Nix store, so they are never downloaded at runtime.
+  models.byId."Xenova/whisper-small" = pkgs.fetchFromGitHub {
+    owner = "Xenova";
+    repo = "whisper-small";
+    rev = "…";
+    hash = "sha256-…";
+  };
+  config.extensions.models.speechToText = "Xenova/whisper-small";
+
   # The four settings a reverse proxy in front of SillyTavern gets wrong.
   proxyUpstreams = [ { maxBodySize = "512m"; readTimeout = "1h"; } ];
 };
@@ -271,6 +289,14 @@ Notes on the parts that are not obvious:
   replies, world books and workflows. The buckets are the server's own
   directory names; the module derives the path and asserts the directory
   against upstream, so a wrong name fails the build.
+- **`models.*` is for the models SillyTavern runs itself** — the ONNX
+  weights behind the extensions (embeddings, captioning, speech-to-text,
+  text-to-speech). `models.byId` puts them in the Nix store, inside the
+  package; `models.directory` points the server at a directory you manage
+  yourself. A local LLM is NOT one of these: SillyTavern has no inference
+  engine, so a GGUF file belongs to the llama.cpp or Ollama server, and
+  SillyTavern is pointed at that. See
+  [`options.md`](options.md#locally-run-models-models).
 - **`customCss` is a path**, not a string: `./ui-overrides.css`, copied to
   `<dataRoot>/_css/user.css`. It is the one file this module **overwrites on
   every activation** — the stylesheet is Nix-authoritative, so edit the file
@@ -427,7 +453,7 @@ nixos-rebuild
 | [`installing.md`](installing.md) | the two decisions that block you: authentication and TLS; where the data lives; reverse proxying; migrating an existing install |
 | [`options.md`](options.md) | every option, grouped, with the escape hatch to reach for when the option you want does not exist |
 | [`users.md`](users.md) | accounts, permissions, SSO, and how the account database is actually stored |
-| [`settings-surface.md`](settings-surface.md) | the UI's own settings: what is Nix-defined, what is session state, and the 410 typed options |
+| [`settings-surface.md`](settings-surface.md) | the UI's own settings: what is Nix-defined, what is session state, and the 439 typed options |
 | [`ui-surface.md`](ui-surface.md) | what the front-end reads, and what is deliberately not configurable |
 | [`troubleshooting.md`](troubleshooting.md) | symptoms and causes |
 | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | how to work on this fork |

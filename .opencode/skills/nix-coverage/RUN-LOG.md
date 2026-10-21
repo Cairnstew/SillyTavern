@@ -853,6 +853,135 @@ is the right shape for the check — evaluate the configuration and report the
 assertion failures — but nothing in the suite passes a self-referential
 `proxyUpstreams` through it.
 
+---
+
+## 2026-10-21 — the locally-run models: three traps and one wrong premise
+
+Asked to make the models SillyTavern runs itself Nix-definable. The work turned
+up one wrong premise (mine), one gap the guard was HIDING (upstream's), and
+three Nix traps.
+
+### The premise: SillyTavern does not run LLMs, and the module cannot change that
+
+The models SillyTavern loads itself are the transformers.js ONNX weights
+behind the extensions — classification, captioning, embeddings, speech-to-text,
+text-to-speech. A GGUF file behind llama.cpp, an Ollama tag, a KoboldCpp
+checkpoint: those belong to the **inference server**. SillyTavern has no
+inference engine, and no option can give it one.
+
+So "point SillyTavern at a local model" has two halves, and they are in
+different places:
+
+- the **weights** → the inference server's configuration, and SillyTavern only
+  needs the endpoint (`settingsExtra.oaiSettings.custom_url`, or
+  `settingsExtra.textGenerationSettings.server_urls`);
+- the **ONNX weights** → SillyTavern's own, and those are the ones that were
+  unreachable from Nix.
+
+**Rule:** before adding an option, say out loud which of the two the request
+is about. A "models" option group that cannot hold a GGUF file is not a
+half-finished feature; it is the right feature for a different question.
+
+### A surface derived from a SAMPLE is a subset, and the guard turns that into a REFUSAL
+
+`textgenerationwebui_settings` was derived from `default/content/presets/textgen/*.json`
+— the shipped **presets**. The union of the presets is the sampling fields, and
+nothing else. The CONNECTOR — `type` ("ollama", "llamacpp", "koboldcpp",
+"vllm", …), `server_urls`, and the per-backend model names — is not a preset
+field; it lives in the settings object in `public/scripts/textgen-settings.js`.
+
+So `settings.common.textgenerationwebui_settings.type` was **refused** by the
+key guard:
+
+```
+These settings.json paths are not settings SillyTavern has, so they are
+written to disk and then ignored:
+  - textgenerationwebui_settings.type
+```
+
+A refusal is the loud failure mode, which is why this hid for so long: it
+looked like the guard working. What it was actually saying is "the inventory
+has never heard of this". The Text Completion backend could not be pointed at
+a local inference server from Nix at all.
+
+**Rule:** derive a surface from the object upstream actually uses, not from a
+sample of its saved forms. A preset is a *value* of the settings object; the
+object is the surface. Whenever the extractor reads a file of samples, check
+what the object itself contains that the samples do not — here, 29 fields,
+including every field that decides *which backend the account talks to*.
+
+The fix was in the extractor, not in a hand-written list: read the literal
+`textgenerationwebui_settings` out of `textgen-settings.js` as well, and let
+the preset union win where both have a key. 61 fields → 90; 410 → 439.
+
+### A hardcoded upstream path has a SECOND lookup location, and it is the better one
+
+`src/transformers.js:134` hardcodes the model cache:
+
+```js
+const cacheDir = path.join(globalThis.DATA_ROOT, '_cache');
+```
+
+No config key, no environment variable. The obvious move is to make that path
+point somewhere else — a symlink, a bind mount, a patch.
+
+But transformers.js looks in **two** places (`src/utils/hub.js` in the
+`sillytavern-transformers` package), in this order:
+
+1. the FS cache — `<cache_dir>/<model-id>/<file>`;
+2. the local path — `<env.localModelPath>/<model-id>/<file>`
+
+and `env.localModelPath` is `path.join(__dirname, "/models/")` — **inside the
+package**. In a Nix build the package is a store path, and a store path can
+hold the weights perfectly well: they become part of the package's closure,
+content-addressed and garbage collected with it. No symlink, no runtime state,
+no writable directory.
+
+**Rule:** when upstream hardcodes a path, find the library's *other* lookup
+location before inventing a redirection. A data directory is the answer when
+the bytes are the operator's; a store path is the answer when the bytes are
+yours. Both are offered, and they are different options for different
+questions.
+
+### Nix traps, sixth and seventh
+
+- **`lib.hasInfix` cannot take a store path.** It is `builtins.match
+  ".*<needle>.*"`, and Nix refuses a store path in a regular expression:
+
+  ```
+  error: the string '.*/nix/store/…-config\.json.*' is not allowed to refer
+  to a store path
+  ```
+
+  A check that greps a rendered unit for a store path has to look for
+  something else — a flag name, a path with the store part elided — and assert
+  the VALUE separately. (The RUN-LOG already records that `lib.hasInfix` takes
+  a string; this is a second, independent restriction on the same function.)
+- **A `guardsFire` needle is a REGULAR EXPRESSION.** The parentheses in
+  `dataRoot (/var/lib/somewhere-else) is not` are a group, so the pattern
+  asked for a message with no parentheses in it, matched nothing, and the row
+  reported itself DEAD. Escape them: `dataRoot \\(/var/…\\) is not`.
+- **`types.path` refuses a relative string**, so an assertion that a path is
+  absolute is unreachable — the type is the guard, and it fails loudly. This
+  is the "add an assertion only for configurations that fail SILENTLY" rule
+  catching an author (me) about to add a redundant one.
+
+### `nix flake check --no-build` and a derivation it has not seen
+
+A check that introduced a NEW input derivation (`pkgs.writeTextDir`) failed
+with `path '…-pw.drv' is not valid` — not a code bug. `--no-build` evaluates
+the check's derivation, and the input's `.drv` had never been written to the
+store. It goes away as soon as the input has been realised once, which is
+worth knowing before spending an hour on it.
+
+### Live test
+
+The models wiring was live-tested, not just evaluated: the package was built
+with a model in it, `env.localModelPath` was confirmed to resolve to
+`<package>/node_modules/sillytavern-transformers/models/` inside the STORE
+path, and a tokenizer was loaded from the linked cache with
+`local_files_only: true` — no network, no download, from both lookup paths.
+
 ## 2026-10-21 — model layers: two gaps found while planning
 
 ### `settings-surface.md` §3.1 omits the only per-character hook

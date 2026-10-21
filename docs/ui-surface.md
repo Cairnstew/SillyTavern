@@ -102,7 +102,7 @@ Extracted from the default-value object literals:
 | `nai_settings` | `public/scripts/nai-settings.js:36` | **25** |
 | `horde_settings` | `public/scripts/horde.js:25` | **4** |
 | `world_info_settings` | `public/scripts/world-info.js:795` (`getWorldInfoSettings`) | **13** |
-| `textgenerationwebui_settings` | per-preset, not a literal — 61 keys in `textgen/Universal-Light.json` | **~61** |
+| `textgenerationwebui_settings` | per-preset, not a literal — the preset union plus the connector fields | **92** |
 
 `oai_settings` + `power_user` alone are 251 keys. That is the size of the
 problem: this is not a config file, it is the application state.
@@ -225,7 +225,7 @@ result: all three subtrees and all three file paths landed as documented.
 
 This document maps the UI surface by hand. The *settings* part of it is not by
 hand any more: `lib/settings-inventory.json` is derived from upstream's own
-sources by `scripts/extract_settings_inventory.mjs` and lists all 410 leaf
+sources by `scripts/extract_settings_inventory.mjs` and lists all 439 leaf
 fields of the seven `settings.json` subtrees, with their types and upstream's
 defaults.
 

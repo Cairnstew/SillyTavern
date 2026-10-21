@@ -8,7 +8,7 @@ The short answer, and the answer this document backs with evidence:
 > **All of them are already reachable from Nix** — `settings.common` and
 > `settings.byUser.<handle>` are deep-merged into every account's
 > `settings.json`. What was missing was not *reachability* but **knowledge**:
-> nothing in the repository enumerated the 410 real setting paths, so a typo was
+> nothing in the repository enumerated the 439 real setting paths, so a typo was
 > accepted silently and did nothing. That is now fixed mechanically
 > (`lib/settings-inventory.json`, derived from upstream's own source) and
 > enforced at evaluation time (`settingsKeysKnown`).
@@ -65,12 +65,12 @@ settings.power_user)`), so unknown *leaf* names survive but are never read.
 |---|---|---|---|
 | AI Response Configuration | `oai_settings` | 106 | `public/scripts/openai.js` |
 | User Settings (Interface, Chat, Prompt, Persona …) | `power_user` | 182 | `public/scripts/power-user.js` |
-| Text Completion | `textgenerationwebui_settings` | 61 | `default/content/presets/textgen/*.json` |
+| Text Completion | `textgenerationwebui_settings` | 90 | `default/content/presets/textgen/*.json` + `public/scripts/textgen-settings.js` |
 | NovelAI | `nai_settings` | 24 | `public/scripts/nai-settings.js` |
 | KoboldAI Classic | `kai_settings` | 20 | `public/scripts/kai-settings.js` |
 | World Info / Lorebook | `world_info_settings` | 13 | `public/scripts/world-info.js` |
 | AI Horde | `horde_settings` | 4 | `public/scripts/horde.js` |
-| **Total** | | **410** | |
+| **Total** | | **439** | |
 
 Plus the 24 top-level keys above, of which the ones worth declaring are
 `main_api`, `max_context`, `amount_gen`, `username` (already typed as
@@ -179,14 +179,14 @@ everything is as useless as no guard:
 
 ## 6. The typed tree — done
 
-Every one of the 410 settings is now a **typed option** as well as reachable
+Every one of the 439 settings is now a **typed option** as well as reachable
 through the free-form blob:
 
 | Option | `settings.json` key | Fields |
 |---|---|---|
 | `settingsExtra.powerUser` | `power_user` | 182 |
 | `settingsExtra.oaiSettings` | `oai_settings` | 106 |
-| `settingsExtra.textGenerationSettings` | `textgenerationwebui_settings` | 61 |
+| `settingsExtra.textGenerationSettings` | `textgenerationwebui_settings` | 90 |
 | `settingsExtra.naiSettings` | `nai_settings` | 24 |
 | `settingsExtra.kaiSettings` | `kai_settings` | 20 |
 | `settingsExtra.hordeSettings` | `horde_settings` | 4 |
@@ -629,9 +629,28 @@ Source: `public/scripts/world-info.js`
 | `world_info_use_group_scoring` | bool | `false` |
 | `world_info_max_recursion_steps` | int | `0` |
 
-### `textgenerationwebui_settings` — 61 leaf fields
+### `textgenerationwebui_settings` — 90 leaf fields
 
-Source: `default/content/presets/textgen/*.json`
+Source: `default/content/presets/textgen/*.json` (the sampling fields) and
+`public/scripts/textgen-settings.js` (the connector: which backend the
+account talks to, and where)
+
+Two of them are **free-form maps**, keyed by data rather than structure:
+
+| Map | Keyed by | For |
+|---|---|---|
+| `server_urls` | the backend name (`ollama`, `llamacpp`, `koboldcpp`, `vllm`, …) | the URL of each backend |
+| `extensions` | the extension's name | whatever the extension stores |
+
+`server_urls` is how a **local** inference server is reached:
+
+```nix
+services.sillytavern-nixos.settingsExtra.textGenerationSettings = {
+  type = "ollama";
+  server_urls.ollama = "http://127.0.0.1:11434";
+  ollama_model = "llama3.1:8b";
+};
+```
 
 | Setting | Type | Upstream default |
 |---|---|---|
@@ -696,3 +715,32 @@ Source: `default/content/presets/textgen/*.json`
 | `nsigma` | int | `0` |
 | `min_keep` | int | `0` |
 | `rep_pen_size` | int | `0` |
+| `max_tokens_second` | int | `0` |
+| `preset` | str | `"Default"` |
+| `stopping_strings` | array | a list |
+| `include_reasoning` | bool | `true` |
+| `streaming` | bool | `false` |
+| `global_banned_tokens` | str | `""` |
+| `send_banned_tokens` | bool | `true` |
+| `type` | str | `"ooba"` |
+| `mancer_model` | str | `"mytholite"` |
+| `togetherai_model` | str | `"Gryphe/MythoMax-L2-13b"` |
+| `infermaticai_model` | str | `""` |
+| `ollama_model` | str | `""` |
+| `vllm_model` | str | `""` |
+| `aphrodite_model` | str | `""` |
+| `dreamgen_model` | str | `"lucid-v1-extra-large/text"` |
+| `tabby_model` | str | `""` |
+| `llamacpp_model` | str | `""` |
+| `featherless_model` | str | `""` |
+| `generic_model` | str | `""` |
+| `adaptive_target` | float | `-0.01` |
+| `adaptive_decay` | float | `0.9` |
+| `seed` | int | `-1` |
+| `openrouter_model` | str | `"openrouter/auto"` |
+| `openrouter_providers` | array | a list |
+| `openrouter_quantizations` | array | a list |
+| `n` | int | `1` |
+| `custom_model` | str | `""` |
+| `bypass_status_check` | bool | `false` |
+| `openrouter_allow_fallbacks` | bool | `true` |

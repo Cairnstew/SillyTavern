@@ -869,8 +869,14 @@ in
     # ── The data root ─────────────────────────────────────────────────────────
 
     # Derived, not set directly: `StateDirectory = "sillytavern"` gives
-    # /var/lib/sillytavern, and the module passes that to `--dataRoot`. Making it
-    # an option would only create a second way to be wrong.
+    # /var/lib/sillytavern, and the module passes that to `--dataRoot`.
+    #
+    # `stateDirectory` is the knob; `dataRoot` below is the resolved path, and
+    # it is PUBLIC so that `nixos-option` and the generated documentation show
+    # where the files actually go. It is still derived — modules/config.nix
+    # assigns it with `mkDefault`, and modules/assertions.nix refuses any
+    # value that is not `/var/lib/${stateDirectory}`, because the unit's only
+    # writable directory is the StateDirectory.
     stateDirectory = mkOption {
       type = types.str;
       default = "sillytavern";
@@ -890,10 +896,28 @@ in
       # a merge path that fails inside nixpkgs' `lib/modules.nix` with
       # "attribute 'deprecationMessage' missing" — an error naming the option's
       # TYPE when the real problem is the readOnly-with-no-definitions shape.
-      internal = true;
+      #
+      # NOT `internal = true`, though: this is the DATA DIRECTORY — the one
+      # option that says where SillyTavern's own files live — and hiding it
+      # from `nixos-option` and the generated documentation made it look like
+      # the module had no data directory at all.
       default = "/var/lib/sillytavern";
       defaultText = "/var/lib/${config.services.sillytavern-nixos.stateDirectory}";
-      description = "Resolved absolute data root, derived from `stateDirectory`.";
+      description = ''
+        The data directory: the root of everything SillyTavern writes.
+
+        It is DERIVED from `stateDirectory`, which is the systemd
+        `StateDirectory` — so `/var/lib/sillytavern` by default — and it
+        holds every account's chats, characters, settings, uploads, backups,
+        thumbnails, the user key-value store, and the webpack cache the server
+        rebuilds on every start.
+
+        Changing `stateDirectory` changes this. Setting `dataRoot` to
+        something else is REFUSED: the unit's only writable directory is the
+        StateDirectory, so a data root outside it would be unwritable, and
+        the failure would surface as a service that starts and then cannot
+        save anything. Change `stateDirectory` instead.
+      '';
     };
 
     # ── Server identity ───────────────────────────────────────────────────────
@@ -2721,6 +2745,130 @@ equivalents.
           Per-account model layers, keyed by account HANDLE. The handle must be
           a declared account (or `default-user`), for the same reason
           `settings.byUser` does.
+        '';
+      };
+    };
+
+    # ── Locally-run models ────────────────────────────────────────────────────
+    #
+    # SillyTavern runs SOME models itself, in-process: the transformers.js
+    # pipelines behind the extensions — classification, captioning, embeddings,
+    # speech-to-text and text-to-speech — plus the tokenizers they pull in.
+    #
+    # Everything else belongs to the inference server, NOT to SillyTavern: a
+    # GGUF file behind llama.cpp, an Ollama tag, a KoboldCpp checkpoint. From
+    # here you point SillyTavern AT that server —
+    # `settingsExtra.oaiSettings.chat_completion_source`, `.custom_url` and
+    # `.custom_model` — and the weights live wherever that server keeps them.
+    # Nothing in this group changes that, and nothing here can make SillyTavern
+    # serve a local LLM by itself: it has no inference engine.
+    #
+    # The ONNX weights it does run are, by upstream's default, DOWNLOADED from
+    # HuggingFace on first use into a cache directory. Upstream hardcodes that
+    # path — `src/transformers.js:134`:
+    #
+    #   const cacheDir = path.join(globalThis.DATA_ROOT, '_cache');
+    #
+    # with no config key and no environment variable, so the module has to
+    # reach it the only way it can: by making that path point somewhere else,
+    # or by putting the weights where transformers.js looks FIRST.
+    #
+    # transformers.js resolves a model file from TWO places, in this order
+    # (`src/utils/hub.js` in the `sillytavern-transformers` package):
+    #
+    #   1. the FS cache   — `<cache_dir>/<model-id>/<file>`
+    #   2. the local path — `<localModelPath>/<model-id>/<file>`
+    #
+    # and `localModelPath` is `<the transformers.js package>/models/` — INSIDE
+    # the package, which in a Nix build is a read-only store path.
+    #
+    # Hence the two ways to declare a model here, which differ in where the
+    # bytes live:
+    #
+    #   `byId`      the weights become part of the PACKAGE, in the store
+    #   `directory` the weights live in a directory you point at
+    models = {
+      byId = mkOption {
+        type = types.attrsOf types.path;
+        default = { };
+        example = literalExpression ''
+          {
+            "Xenova/whisper-small" = pkgs.fetchFromGitHub {
+              owner = "Xenova";
+              repo = "whisper-small";
+              rev = "e8e0c1d19bf7f0d4a4a3f2b0d1a0e0f0a0b0c0d0";
+              hash = "sha256-…";
+            };
+          }
+        '';
+        description = ''
+          Model weights SillyTavern runs itself, keyed by their upstream model
+          id — the same string upstream's `config.extensions.models.*` options
+          take, e.g. `"Xenova/whisper-small"`.
+
+          Each value is a DIRECTORY in HuggingFace layout: `config.json`,
+          `tokenizer.json`, `onnx/…` and whatever else the model needs. The
+          whole HuggingFace repository snapshot works, because that layout is
+          exactly what transformers.js asks for.
+
+          The directory is installed into the PACKAGE, at
+          `node_modules/sillytavern-transformers/models/<model id>/` — the
+          `localModelPath` transformers.js searches when a file is not already
+          in the cache. So:
+
+          * the weights are in the Nix store: content-addressed, garbage
+            collected with the package, never re-downloaded;
+          * the server needs no network and no writable model directory;
+          * `config.extensions.models.autoDownload` does not have to be turned
+            off — the local file is found before any download is attempted.
+
+          The value must be a STORE PATH. A path outside the store cannot be
+          linked into a store path (the link would dangle the moment the
+          garbage collector ran), and the module refuses one rather than
+          producing a package that breaks later.
+
+          The model id must match the one the server asks for. It is also the
+          key upstream's `config.extensions.models.*` options use, so the two
+          must agree:
+
+            services.sillytavern-nixos = {
+              models.byId."Xenova/whisper-small" = …;
+              config.extensions.models.speechToText = "Xenova/whisper-small";
+            };
+        '';
+      };
+
+      directory = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        example = literalExpression "/var/lib/sillytavern-models";
+        description = ''
+          A directory of model weights, used as the model's data directory at
+          runtime.
+
+          Its contents must be in transformers.js cache layout — one
+          subdirectory per model id, each holding that model's files:
+
+            <directory>/Xenova/whisper-small/config.json
+            <directory>/Xenova/whisper-small/onnx/…
+
+          The module points upstream's hardcoded cache path
+          (`<dataRoot>/_cache`) at this directory, so the server finds the
+          weights exactly where it would have found downloaded ones.
+
+          Use this for weights you manage OUTSIDE Nix — a directory on another
+          disk, a mount, a set of files you fetched by hand. Use `models.byId`
+          instead for weights that should be part of the Nix store.
+
+          A writable directory keeps `config.extensions.models.autoDownload`
+          working: the server can still download a model it does not find
+          locally, into this directory. A READ-ONLY one (a store path) cannot
+          be written to, so the module forces `autoDownload` off in that case
+          — a download into the store would fail with EROFS.
+
+          The directory must exist when the service starts; the module creates
+          the link, not the directory, and fails loudly if the target is
+          missing.
         '';
       };
     };

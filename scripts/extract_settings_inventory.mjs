@@ -408,6 +408,25 @@ const DATA_KEYED_MAPS = {
  * `textgenerationwebui_settings` is per-preset, not a literal. The shipped
  * presets in `default/content/presets/textgen/` are the ground truth for
  * which keys exist; the union across all of them is the surface.
+ *
+ * BUT the presets are only half of it. The CONNECTOR — which backend the
+ * account talks to, and where — is not a preset field: it is
+ * `textgenerationwebui_settings.type` ("ollama", "llamacpp", "koboldcpp",
+ * "vllm", …) and `textgenerationwebui_settings.server_urls` (the URL for each
+ * of them), plus the per-backend model names (`ollama_model`,
+ * `llamacpp_model`, …). Those live in the settings object itself, in
+ * `public/scripts/textgen-settings.js`.
+ *
+ * Without them the Text Completion backend could not be pointed at a LOCAL
+ * inference server from Nix at all:
+ * `settings.common.textgenerationwebui_settings.type` was refused by the key
+ * guard as "not a setting SillyTavern has", because the inventory had never
+ * heard of it.
+ *
+ * So the literal is read as well, and its keys are added to the preset union.
+ * The PRESET value wins where both have a key — a preset is a saved
+ * configuration, so its value is the more specific one — and the literal
+ * contributes the keys no preset has.
  */
 function extractTextGen() {
     const dir = path.join(ROOT, 'default', 'content', 'presets', 'textgen');
@@ -424,9 +443,21 @@ function extractTextGen() {
             if (!(k in merged)) merged[k] = shapeOf(v);
         }
     }
+
+    // The connector fields, from the settings object itself.
+    const file = 'public/scripts/textgen-settings.js';
+    const source = fs.readFileSync(path.join(ROOT, file), 'utf8');
+    const text = literalFor(source, 'textgenerationwebui_settings');
+    if (!text) throw new Error('could not find textgenerationwebui_settings in textgen-settings.js');
+    const ctx = buildContext();
+    const literal = evaluate(ctx, text);
+    for (const [k, v] of Object.entries(literal)) {
+        if (!(k in merged)) merged[k] = shapeOf(v);
+    }
+
     return {
         key: 'textgenerationwebui_settings',
-        file: 'default/content/presets/textgen/*.json',
+        file: 'default/content/presets/textgen/*.json + public/scripts/textgen-settings.js',
         shape: { type: 'object', value: merged },
     };
 }

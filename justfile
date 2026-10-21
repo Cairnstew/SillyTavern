@@ -47,7 +47,7 @@ live_handle := env_var_or_default("ST_LIVE_HANDLE", "me")
 
 # The Python test suites under `nix-tests/`, excluding the live ones (they
 # need a built server and take minutes, so they are a separate recipe).
-unit_tests := "nix-tests/test_seed_files.py nix-tests/test_seed_users.py"
+unit_tests := "nix-tests/test_seed_files.py nix-tests/test_seed_users.py nix-tests/test_link_models.py"
 
 # The coverage audit script.
 audit_script := ".opencode/skills/nix-coverage/scripts/audit.py"

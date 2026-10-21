@@ -22,10 +22,10 @@ below come from the audit; the check list comes from `lib/tests.nix`.
 |---|---|---|---|
 | `config.yaml` keys | **109** | 109 | **100%** |
 | CLI flags | **31** | 31 | **100%** |
-| `settings.json` keys (the UI) | **410** | 410 | **100%** — via `settings.common` / `settings.byUser`, now *enforced*; and **all 410 also have a typed option** |
+| `settings.json` keys (the UI) | **439** | 439 | **100%** — via `settings.common` / `settings.byUser`, now *enforced*; and **all 439 also have a typed option** |
 | `SILLYTAVERN_*` env overrides | all | all | **via `extraConfigEnv`** — see precedence |
 | Per-account state (files/presets/themes) | all known | — | **via `files.byUser` / `files.<name>`** |
-| Module options declared | 1026 | — | — |
+| Module options declared | 1059 | — | — |
 
 The first three rows are **computed by the audit** and re-derived on every run.
 The last two are **not** — they are maintained by hand, and a hand-maintained
@@ -110,14 +110,14 @@ spec rendered from the option tree. Policy is per-entry `policy`
 
 `settings.json` is the *other* backend: not `config.yaml` (which drives the
 server) but the per-account state the **browser** reads by direct property
-access. It is 24 top-level keys over seven subtrees, and it holds **410 leaf
+access. It is 24 top-level keys over seven subtrees, and it holds **439 leaf
 fields** across the UI's tabs:
 
 | Subtree | Leaf fields | Source |
 |---|---|---|
 | `power_user` (User Settings) | 182 | `public/scripts/power-user.js` |
 | `oai_settings` (AI Response Configuration) | 106 | `public/scripts/openai.js` |
-| `textgenerationwebui_settings` (Text Completion) | 61 | `default/content/presets/textgen/*.json` |
+| `textgenerationwebui_settings` (Text Completion) | 90 | `default/content/presets/textgen/*.json` + `public/scripts/textgen-settings.js` |
 | `nai_settings` (NovelAI) | 24 | `public/scripts/nai-settings.js` |
 | `kai_settings` (KoboldAI Classic) | 20 | `public/scripts/kai-settings.js` |
 | `world_info_settings` (World Info) | 13 | `public/scripts/world-info.js` |
@@ -140,7 +140,7 @@ Both are now true, and both are measured:
   browser *deletes* those at the next save, so they look applied until they
   are not).
 * `settingsExtra.*` — a **typed option tree** for the seven UI subtrees,
-  generated from the same inventory (`lib/settings-tree.nix`), so all 410
+  generated from the same inventory (`lib/settings-tree.nix`), so all 439
   settings are typed options with upstream's own names, types and defaults.
   A typo is an evaluation error with the right spelling suggested, and
   `settingsTypedTree` / `settingsTypedTreeRefusesTypos` prove both
@@ -148,6 +148,42 @@ Both are now true, and both are measured:
 
 The human-readable map, with a classification of what should be Nix-defined
 and what is session state the UI owns, is `docs/settings-surface.md`.
+
+## 4b. Locally-run models — `models.*`
+
+SillyTavern runs SOME models itself, in-process: the transformers.js ONNX
+pipelines behind the extensions (classification, captioning, embeddings,
+speech-to-text, text-to-speech) and the tokenizers they pull in. Those are the
+only models it runs.
+
+Everything else — a GGUF file behind llama.cpp, an Ollama tag, a KoboldCpp
+checkpoint — belongs to the **inference server**, not to SillyTavern, which has
+no inference engine. From Nix you point SillyTavern *at* that server, and that
+is covered by the typed settings tree:
+
+| Backend | Option |
+|---|---|
+| any OpenAI-compatible server (llama.cpp's server, vLLM, LM Studio, Ollama's `/v1`) | `settingsExtra.oaiSettings.chat_completion_source` / `.custom_url` / `.custom_model` |
+| Ollama, llama.cpp, KoboldCpp, vLLM natively (Text Completion panel) | `settingsExtra.textGenerationSettings.type` / `.server_urls` / `.ollama_model` … |
+| KoboldAI Classic | `settingsExtra.kaiSettings.api_server` |
+
+The weights the ONNX pipelines use were, until this session, **downloaded from
+HuggingFace at runtime** into a directory upstream hardcodes
+(`src/transformers.js:134`, `path.join(globalThis.DATA_ROOT, '_cache')`) with no
+config key and no environment variable. There was no way to say "these weights
+are here" from Nix, and no way to keep the server off the network.
+
+There is now:
+
+| Option | Where the weights live | What it is for |
+|---|---|---|
+| `models.byId` | **in the store**, inside the package, at `node_modules/sillytavern-transformers/models/<model id>/` — the `localModelPath` transformers.js searches | weights that should be pinned, content-addressed and garbage collected with the package |
+| `models.directory` | **where you put them** — `<dataRoot>/_cache` becomes a symlink to it | weights managed outside Nix |
+
+A read-only model directory (a store path) forces
+`config.extensions.models.autoDownload` off, because transformers.js downloads
+into the cache and a download into a read-only one fails with EROFS instead of
+the clear "file not found locally".
 
 ## 5. Deliberately NOT Nix-drivable
 
@@ -200,7 +236,7 @@ is a gap you will misdiagnose.
 
 - ~~**`settings.json` keys were unchecked**~~ — **FIXED.**
   `lib/settings-inventory.json` is now derived from upstream's own sources
-  (`scripts/extract_settings_inventory.mjs`) and lists all 410 leaf fields of
+  (`scripts/extract_settings_inventory.mjs`) and lists all 439 leaf fields of
   the seven UI subtrees, plus the 24 top-level keys the client writes. The
   `settingsKeysKnown` assertion refuses a path upstream does not have, and a
   key outside the client's save payload — the browser deletes those at the
@@ -209,13 +245,13 @@ is a gap you will misdiagnose.
   examples named settings that do not exist upstream
   (`oai_settings.max_context`, `power_user.quick_ui`); they are fixed.
   See `docs/settings-surface.md`.
-- ~~**The 410 settings were reachable but not *typeable***~~ — **FIXED.**
+- ~~**The 439 settings were reachable but not *typeable***~~ — **FIXED.**
   `settingsExtra.powerUser` and its six siblings are a typed mirror of the
   `settings.json` subtrees, generated from the same inventory by
   `lib/settings-tree.nix`: one option per setting, `nullOr` with `null`
   meaning "not declared", and upstream's names verbatim. A typo is refused at
   evaluation time with the correct spelling suggested. The module went from
-  279 declared options to 782, and 1026 now.
+  279 declared options to 782, and 1059 now.
 
 - ~~**`configYamlRoundTrip` could not build the `yaml` npm package**~~ — **FIXED.**
   The check passed `caCertFile` as a host path (`/etc/ssl/certs/ca-bundle.crt`),

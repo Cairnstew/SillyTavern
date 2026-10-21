@@ -207,6 +207,25 @@ let
       ) cfg.files.byUser
     );
 
+  # Model ids that cannot be used as a path under the package's
+  # transformers.js `models/` directory.
+  #
+  # The id becomes a directory name, so every COMPONENT of it has to be a
+  # plain name: not empty, not ".", not "..". An empty component is what a
+  # leading or trailing slash (or a doubled slash) produces; ".." would put
+  # the weights outside the directory they belong in, where the server never
+  # looks.
+  badModelIds = lib.filter (
+    id: lib.any (component: component == "" || component == "." || component == "..") (lib.splitString "/" id)
+  ) (builtins.attrNames cfg.models.byId);
+
+  # Model weights that are not store paths, and therefore cannot be linked
+  # into the package (a store path can hold a link to another store path, but
+  # not to a directory outside the store).
+  nonStoreModels = lib.filter (
+    id: !(lib.hasPrefix "/nix/store" (toString cfg.models.byId.${id}))
+  ) (builtins.attrNames cfg.models.byId);
+
   # Every `presets` declaration, as { handle, bucket, name, path, entry }.
   #
   # `presets` and `files` are two VIEWS of the same files, so a preset
@@ -1456,6 +1475,88 @@ in
       '';
     }
 
+    # ── the data root IS the state directory ──────────────────────────────────
+    #
+    # `dataRoot` is derived from `stateDirectory`, and the unit's ONLY writable
+    # directory is the systemd StateDirectory — which systemd creates at
+    # `/var/lib/<stateDirectory>`. A data root anywhere else is not merely
+    # unusual, it is unwritable, and the failure surfaces as a service that
+    # starts, serves, and then cannot save a single chat.
+    #
+    # `dataRoot` is a public option so that `nixos-option` and the generated
+    # documentation show where the files go; it is not a second way to move
+    # them. `stateDirectory` is the knob.
+    {
+      assertion = cfg.dataRoot == "/var/lib/${cfg.stateDirectory}";
+      message = ''
+        services.sillytavern-nixos: dataRoot (${cfg.dataRoot}) is not
+        /var/lib/${cfg.stateDirectory}.
+
+        The data root is the systemd StateDirectory, and that is the ONLY
+        directory the unit may write to: `ProtectSystem=strict` makes the rest
+        of the filesystem read-only, and systemd creates and owns the state
+        directory itself. A data root outside it is unwritable, so the service
+        would start and then fail on the first chat, upload or settings write
+        — losing data rather than merely logging.
+
+        Change services.sillytavern-nixos.stateDirectory instead; dataRoot
+        follows it.
+      '';
+    }
+
+    # ── locally-run models ───────────────────────────────────────────────────
+    #
+    # The model id becomes a PATH under the package's transformers.js
+    # `models/` directory, so it has to be a plain relative path. A key with
+    # ".." in it would put the weights somewhere the server never looks; a
+    # leading or trailing slash would make the install step write outside the
+    # directory it is supposed to write in.
+    {
+      assertion = badModelIds == [ ];
+      message = ''
+        services.sillytavern-nixos: a models.byId key is not a usable model id:
+        ${lib.concatStringsSep ", " badModelIds}.
+
+        The key is the model id upstream's `config.extensions.models.*` options
+        take ("Xenova/whisper-small"), and it also becomes a directory under
+        the package's transformers.js `models/` path. A key that is empty,
+        absolute, or contains ".." would install the weights somewhere the
+        server never looks — and the download would then happen silently at
+        runtime instead, into a directory you cannot see.
+
+        The model ids in use: ${lib.concatStringsSep ", " (builtins.attrNames cfg.models.byId)}
+      '';
+    }
+
+    # A store path can hold a link to another store path; it cannot hold a
+    # link to a directory outside the store, because that link dangles the
+    # moment the garbage collector runs — and it fails the store's own
+    # "no broken symlinks" check at build time, long after the mistake.
+    {
+      assertion = nonStoreModels == [ ];
+      message = ''
+        services.sillytavern-nixos: these models.byId values are not store paths:
+        ${lib.concatStringsSep ", " nonStoreModels}.
+
+        A model's weights are installed INTO the package, which is a store
+        path, so the directory has to be one too: a store path can hold a link
+        to another store path, but a link to a directory outside the store
+        dangles as soon as the garbage collector runs.
+
+        Use a fetch* derivation (pkgs.fetchFromGitHub, pkgs.fetchurl, …) or
+        any other store path. To keep weights outside the store, use
+        services.sillytavern-nixos.models.directory instead.
+      '';
+    }
+
+    # A relative model directory would be resolved against the service
+    # account's working directory — which is the PACKAGE, a read-only store
+    # path — so the link would dangle.
+    #
+    # `types.path` already refuses a relative string, so this cannot be
+    # reached by a relative value: the type is the guard, and it fails
+    # loudly. Nothing to assert here.
+
     # ── forwarded headers ─────────────────────────────────────────────────────
     #
     # `forwardedHeaders.*` and `enableForwardedWhitelist` / `rateLimiting.preferRealIpHeader`
@@ -1632,6 +1733,7 @@ in
         list of strings, or put the variable in a file and reference it.
       '';
     }
+
     # ── Model layers ─────────────────────────────────────────────────────────
     {
       # Declaring a catalogue with the feature off would generate nothing and

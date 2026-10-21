@@ -16,8 +16,10 @@ For the per-account JSON surface — `settings.json`, presets, themes, world boo
 - [Environment variables](#environment-variables)
 - [Files, per account](#files-per-account)
 - [Named profiles: `presets.*`](#named-profiles-presets)
+- [Locally-run models: `models.*`](#locally-run-models-models)
 - [Served models: the llama.cpp backend](#served-models-the-llamacpp-backend)
 - [Model layers: settings that follow a model](#model-layers-settings-that-follow-a-model)
+- [What this module writes at the data root](#what-this-module-writes-at-the-data-root)
 - [Not Nix-configurable](#not-nix-configurable)
 
 ---
@@ -350,7 +352,7 @@ therefore refuses three things at evaluation time:
 
 The list of real settings is **derived from upstream's own source**, not
 written out by hand: `lib/settings-inventory.json`, produced by
-`node scripts/extract_settings_inventory.mjs`. It holds all 410 leaf fields
+`node scripts/extract_settings_inventory.mjs`. It holds all 439 leaf fields
 across the seven UI subtrees, with their types and upstream's defaults.
 `docs/settings-surface.md` is the human-readable map, with a classification of
 what should be Nix-defined and what is session state the UI owns.
@@ -358,7 +360,7 @@ what should be Nix-defined and what is session state the UI owns.
 ### The typed tree: `settingsExtra.*`
 
 `settings.common` is free-form, and it stays that way — it is the escape
-hatch, and it is what per-account overrides use. But every one of the 410
+hatch, and it is what per-account overrides use. But every one of the 439
 settings is *also* a typed option, so the good path is the obvious one:
 
 ```nix
@@ -383,7 +385,7 @@ services.sillytavern-nixos = {
 |---|---|---|
 | `settingsExtra.powerUser` | `power_user` | 182 |
 | `settingsExtra.oaiSettings` | `oai_settings` | 106 |
-| `settingsExtra.textGenerationSettings` | `textgenerationwebui_settings` | 61 |
+| `settingsExtra.textGenerationSettings` | `textgenerationwebui_settings` | 90 |
 | `settingsExtra.naiSettings` | `nai_settings` | 24 |
 | `settingsExtra.kaiSettings` | `kai_settings` | 20 |
 | `settingsExtra.hordeSettings` | `horde_settings` | 4 |
@@ -416,6 +418,131 @@ removed upstream stops being accepted. `nix flake check` proves it both ways
 **Precedence** is unchanged: `settingsExtra` is the base layer,
 `settings.common` overrides it, and `settings.byUser` overrides both. So the
 same leaf can be set in more than one place, and the more specific one wins.
+
+## Locally-run models: `models.*`
+
+SillyTavern runs **some models itself**, in-process: the transformers.js ONNX
+pipelines behind the extensions — classification, captioning, embeddings,
+speech-to-text, text-to-speech — and the tokenizers they pull in. Those are the
+only models it runs. Everything else belongs to an inference server.
+
+### The LLM itself is not SillyTavern's job
+
+A GGUF file behind llama.cpp, an Ollama tag, a KoboldCpp checkpoint: SillyTavern
+has no inference engine and will never load them. What it does is *talk to* one,
+and that part is already fully Nix-able through the typed settings tree — the
+option names are upstream's own:
+
+```nix
+services.sillytavern-nixos.settingsExtra.oaiSettings = {
+  chat_completion_source = "custom";       # any OpenAI-compatible server
+  custom_url = "http://127.0.0.1:8080/v1"; # llama.cpp's server, vLLM, LM Studio, Ollama's /v1
+  custom_model = "my-model";
+};
+```
+
+The KoboldAI backend has its own `settingsExtra.kaiSettings.api_server`.
+
+The weights live wherever that server keeps them — `/var/lib/ollama/models` and
+so on — and are the *server's* configuration, not this module's.
+
+### The models SillyTavern does run
+
+These are the ONNX weights, and by upstream's default they are **downloaded from
+HuggingFace on first use**, into a cache directory whose path upstream
+hardcodes (`src/transformers.js:134`):
+
+```js
+const cacheDir = path.join(globalThis.DATA_ROOT, '_cache');
+```
+
+There is no config key and no environment variable for it, so the module has to
+reach it the only way it can. transformers.js looks for a model file in two
+places, in this order (`src/utils/hub.js` in the `sillytavern-transformers`
+package):
+
+| # | Where | Layout |
+|---|---|---|
+| 1 | the FS cache — `cache_dir` | `<cache_dir>/<model-id>/<file>` |
+| 2 | the local path — `env.localModelPath` | `<localModelPath>/<model-id>/<file>` |
+
+and `localModelPath` is `<the transformers.js package>/models/` — **inside the
+package**, which in a Nix build is a read-only store path.
+
+That gives the module exactly two ways in, and they are the two options:
+
+| Option | Where the weights live | Use it for |
+|---|---|---|
+| `models.byId` | **in the store**, inside the package | weights you want pinned, content-addressed and garbage collected with the package |
+| `models.directory` | **where you put them** | weights you manage outside Nix — another disk, a mount, files fetched by hand |
+
+#### `models.byId` — the weights in the store
+
+```nix
+services.sillytavern-nixos = {
+  models.byId."Xenova/whisper-small" = pkgs.fetchFromGitHub {
+    owner = "Xenova";
+    repo = "whisper-small";
+    rev = "…";
+    hash = "sha256-…";
+  };
+
+  # the model the server will actually ask for
+  config.extensions.models.speechToText = "Xenova/whisper-small";
+};
+```
+
+The directory is installed into the package, at
+`node_modules/sillytavern-transformers/models/<model id>/` — the
+`localModelPath` transformers.js searches second. So the weights are part of the
+package's closure, and:
+
+- the server never downloads them, and needs no network and no writable model
+  directory;
+- `extensions.models.autoDownload` does not have to be turned off — the local
+  file is found before any download is attempted.
+
+The value must be a **store path**: a store path can hold a link to another
+store path, but a link to a directory outside the store dangles as soon as the
+garbage collector runs, so the module refuses one. The key must be the model id
+upstream's `config.extensions.models.*` options take — every component of it a
+plain name, so `../escape` is refused rather than installed somewhere the
+server never looks.
+
+The directory itself should be a HuggingFace repository snapshot: that layout
+(`config.json`, `tokenizer.json`, `onnx/…`) is exactly what transformers.js
+asks for, file by file.
+
+#### `models.directory` — the weights where you put them
+
+```nix
+services.sillytavern-nixos.models.directory = "/var/lib/sillytavern-models";
+```
+
+```
+/var/lib/sillytavern-models/
+└── Xenova/whisper-small/
+    ├── config.json
+    ├── tokenizer.json
+    └── onnx/…
+```
+
+The module points upstream's hardcoded cache path at it: `<dataRoot>/_cache`
+becomes a symlink to this directory, so the server finds the weights exactly
+where it would have found downloaded ones. The link is made at activation, by
+`scripts/st_link_models.py`, and it is idempotent. A cache directory that
+already holds downloaded models is **moved aside**
+(`<dataRoot>/_cache.moved-by-nix`), never deleted.
+
+The directory must exist when the service starts; the module creates the link,
+not the directory, and fails loudly if the target is missing.
+
+A writable directory keeps `extensions.models.autoDownload` working — the server
+can still download a model it does not find locally, into that directory. A
+**read-only** one (a store path) cannot be written to, so the module forces
+`autoDownload` off in that case: transformers.js downloads into the cache
+directory, and a download into a read-only one fails with EROFS instead of the
+clear "file not found locally".
 
 ## Served models: the llama.cpp backend
 

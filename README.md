@@ -54,6 +54,8 @@ that will otherwise block you.
 | **Branded error pages** | `errorPages.*` |
 | **Plugins and extensions** | `plugins` / `extensions`, pinned by `rev` |
 | **TLS** | `ssl.certFile` / `ssl.keyFile`, copied in at build time |
+| **The models it runs itself** | `models.byId` (in the store) / `models.directory` (where you put them) — the ONNX weights behind the extensions, never downloaded at runtime |
+| **A local inference server** | `settingsExtra.oaiSettings` / `.textGenerationSettings` — point SillyTavern at llama.cpp, Ollama, vLLM or KoboldCpp |
 | **The unit** | `systemdOverrides`, `hardware` caps, `restartTriggers` |
 | **A reverse proxy** | `proxyUpstreams` carries the four settings that proxy setups get wrong |
 
@@ -66,7 +68,7 @@ that will otherwise block you.
 - **[docs/options.md](docs/options.md)** — the option surface
 - **[docs/users.md](docs/users.md)** — accounts, permissions, scripting a login
 - **[docs/settings-surface.md](docs/settings-surface.md)** — the UI's own
-  settings, and the 410 typed options that cover them
+  settings, and the 439 typed options that cover them
 - **[docs/troubleshooting.md](docs/troubleshooting.md)** — symptoms and causes
 - **[docs/ui-surface.md](docs/ui-surface.md)** — what the front-end reads, and
   what is deliberately not configurable

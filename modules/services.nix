@@ -73,6 +73,7 @@ let
   seeder = ../scripts/st_seed_users.py;
   jsonSeeder = ../scripts/st_seed_files.py;
   jsonSeederSpec = seedSpec;
+  modelLinker = ../scripts/st_link_models.py;
 
   # Secrets reach the process through this wrapper, not a systemd directive.
   #
@@ -238,6 +239,27 @@ let
       ${lib.getExe python} ${seeder} \
         --data-root ${lib.escapeShellArg cfg.dataRoot} \
         ${lib.concatStringsSep " " (map (spec: "--user " + spec) userSpecs)}
+    ''
+
+    # The model cache is pointed at the configured directory FIRST, before
+    # anything else touches the data root, so the very first start already
+    # sees the right cache.
+    #
+    # Upstream hardcodes the path (`src/transformers.js:134`,
+    # `path.join(globalThis.DATA_ROOT, '_cache')`) with no config key and no
+    # environment variable, so the only way to put the weights somewhere else
+    # is to make that path point there. The script does it idempotently and
+    # moves an existing directory of downloaded models aside rather than
+    # deleting it.
+    #
+    # `internal.modelCacheDir` is null unless `models.directory` is set, in
+    # which case upstream's own `<dataRoot>/_cache` is used and there is
+    # nothing to do.
+    + lib.optionalString (internal.modelCacheDir != null) ''
+      echo "sillytavern: pointing the model cache at ${internal.modelCacheDir}" >&2
+      ${lib.getExe python} ${modelLinker} \
+        --data-root ${lib.escapeShellArg cfg.dataRoot} \
+        --target ${lib.escapeShellArg (toString internal.modelCacheDir)}
     ''
 
     # The JSON state — settings.json, presets, themes, world books — is seeded
