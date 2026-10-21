@@ -110,11 +110,30 @@ let
 
       merged = bucket: mergedBucket entry userModel bucket;
 
-      # The context size is the one value this generator OWNS. It is written
-      # last, so a preset body cannot silently disagree with the backend's
-      # `c = <ctxSize>`. The assertion in modules/assertions.nix refuses a
-      # conflicting value instead of dropping it.
-      openaiBody = (merged "openai") // {
+      # The connection is the second thing this generator OWNS, for the same
+      # reason as `contextSize`: `connection.*` is the one declarative source of
+      # the endpoint, so a preset body must not be able to disagree with it.
+      # The assertion in modules/assertions.nix refuses a conflicting value.
+      #
+      # These keys belong in the PRESET BODY because that is the only per-model
+      # slot SillyTavern has: an account has ONE `oai_settings`, so a second
+      # model's endpoint has nowhere else to live. Upstream applies them when the
+      # preset is selected — `onSettingsPresetChange` (`public/scripts/openai.js`)
+      # walks `settingsToUpdate` and writes `custom_url`, `custom_model` and
+      # `chat_completion_source` into `oai_settings` — but ONLY while
+      # `oai_settings.bind_preset_to_connection` is true. That toggle is NOT part
+      # of `settingsToUpdate`, so it cannot be set from a preset body; it is a
+      # global key whose upstream default is `true`. If an account has turned it
+      # off, selecting the preset applies sampling and nothing else.
+      connectionBody = {
+        chat_completion_source = entry.connection.api;
+        custom_url = entry.connection.url;
+        custom_model = entry.connection.model;
+      };
+
+      # The context size is the other owned value. Both are written last, so a
+      # preset body cannot silently disagree with the backend's `c = <ctxSize>`.
+      openaiBody = (merged "openai") // connectionBody // {
         openai_max_context = entry.contextSize;
       };
 
@@ -137,9 +156,11 @@ let
           charMerged = bucket: deepMerge (merged bucket) (charCfg.presets.${bucket} or { });
           charBucket = bucket:
             if bucket == "openai" then {
-              "${charName}" = presetEntry ((charMerged "openai") // {
-                openai_max_context = entry.contextSize;
-              });
+              "${charName}" = presetEntry (
+                (charMerged "openai") // connectionBody // {
+                  openai_max_context = entry.contextSize;
+                }
+              );
             } else if (charCfg.presets.${bucket} or { }) != { } then {
               "${charName}" = presetEntry (charMerged bucket);
             } else {

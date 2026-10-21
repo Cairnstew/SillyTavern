@@ -473,10 +473,11 @@ let
 
   renderedArgv = st.renderCliArgv cliFlags;
 
-  # The argv the unit actually runs. A LIST, because systemd hands each
-  # `ExecStart` element to the process as a single argv entry: joining the
-  # flags into one escaped word (as `renderedArgv` does, for humans reading the
-  # unit) makes yargs ignore every flag in it.
+  # The argv the unit runs, as a LIST of argv elements — one per argument.
+  # modules/services.nix joins it with `escapeShellArgs` into the single
+  # `ExecStart=` string systemd needs. It is NOT true that a NixOS list becomes
+  # systemd argv: a list renders as one `ExecStart=` line per element (several
+  # commands). See `renderCliArgvList` in lib/default.nix.
   cliArgvList = st.renderCliArgvList cliFlags;
 
   # ── healthcheck.js ──────────────────────────────────────────────────────────

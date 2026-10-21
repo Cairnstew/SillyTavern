@@ -334,14 +334,34 @@ in
         TimeoutStartSec = toString cfg.startupTimeout;
         TimeoutStopSec = toString cfg.shutdownTimeout;
 
-        # A LIST, not a string: this nixpkgs declares `serviceConfig.ExecStart`
-        # as `listOf str`, and a bare string fails with "expected a list but
-        # found a string". The whole command line is one element, so the
-        # rendering of `renderedArgv` stays a single shell-quoted word.
+        # A STRING, not a list. A NixOS `serviceConfig` value that is a LIST is
+        # rendered by `attrsToSection` as ONE `Key=` LINE PER ELEMENT — i.e. as
+        # several commands, which is what `ExecStartPre=`/`ExecStartPost=` are
+        # for. systemd then reads `ExecStart=--configPath=…` as a second
+        # executable, rejects it ("Neither a valid executable name nor an
+        # absolute path, ignoring"), and starts the wrapper with NO
+        # `--configPath` / `--dataRoot` at all: the server falls back to
+        # `./config.yaml`, tries to create it, and dies with EROFS under
+        # `ProtectSystem=strict`. A one-element list renders correctly, which is
+        # why the two sibling units below still look fine — the trap is the
+        # multi-element list, and it is invisible to an eval-time check that
+        # inspects `serviceConfig` instead of the rendered unit.
+        #
+        # So the whole command line is ONE string, and each argv element is
+        # quoted for systemd's OWN parser (which honours single and double
+        # quotes and strips them). `escapeShellArgs` leaves a bare store path
+        # untouched but single-quotes every `--flag=value`, because `=` is not
+        # in nixpkgs' "safe" charset — e.g.
+        #
+        #   ExecStart=/nix/store/…/sillytavern-service '--configPath=/nix/store/…' '--dataRoot=/var/lib/sillytavern'
+        #
+        # which systemd parses back into the three argv entries intended. That
+        # exact line was checked with `systemd-analyze verify`, which reports the
+        # multi-line form above as an error and this form as clean.
+        #
         # `lib.getExe`, not a hard-coded path: the wrapper is a
         # `writeShellApplication`, so it lives at $out/bin/<name>.
-        # A LIST: one element per argv entry, wrapper first.
-        ExecStart = [ (lib.getExe serviceLauncher) ] ++ cliArgvList;
+        ExecStart = lib.escapeShellArgs ([ (lib.getExe serviceLauncher) ] ++ cliArgvList);
 
         Restart = "on-failure";
         RestartSec = 5;
@@ -393,7 +413,19 @@ in
         RestrictRealtime = true;
         RestrictNamespaces = true;
         LockPersonality = true;
-        MemoryDenyWriteExecute = true;
+        # NOT `MemoryDenyWriteExecute`. Node's V8 JIT allocates W+X pages, so
+        # the directive makes `mprotect` fail and V8 aborts at isolate init:
+        #
+        #   # Fatal error in , line 0
+        #   # Check failed: 12 == (*__errno_location ()).
+        #     v8::base::OS::SetPermissions … v8::internal::CodeRange::InitReservation
+        #     … node::NewIsolate
+        #
+        # The process dies with SIGTRAP, the unit restart-loops, and because the
+        # preStart seeder has already succeeded it reads as "the server is
+        # broken" rather than "the sandbox is wrong". The same applies to any
+        # JIT runtime (the JVM, .NET). A host that wants it can set it back
+        # through `systemdOverrides.serviceConfig`; it must not default on.
 
         # The server makes outbound requests to LLM providers, so the network
         # namespace cannot be closed. What can be tightened is the socket
@@ -509,7 +541,9 @@ in
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        ExecStart = [ "${pkgs.coreutils}/bin/true" ];
+        # A string, like the main unit's: a one-element list happens to render
+        # correctly, but a second element would silently become a second command.
+        ExecStart = "${pkgs.coreutils}/bin/true";
       };
     };
 
@@ -528,7 +562,7 @@ in
         Type = "oneshot";
         RemainAfterExit = false;
         environment = healthcheckEnv;
-        ExecStart = [ "${lib.getExe' packaged "sillytavern-healthcheck"}" ];
+        ExecStart = "${lib.getExe' packaged "sillytavern-healthcheck"}";
         # The node the package was built against, via the package's own wrapper.
       };
     };

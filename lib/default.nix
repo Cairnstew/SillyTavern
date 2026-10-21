@@ -512,16 +512,25 @@ let
   # ── renderCliArgvList ───────────────────────────────────────────────────────
   #
   # The SAME flags as `renderCliArgv`, but as a LIST of argv elements — one
-  # element per argument, never a single joined string.
+  # element per argument, never a single joined string. This is the form the
+  # caller wants BEFORE quoting: modules/services.nix joins it with
+  # `escapeShellArgs` (per element) into the single `ExecStart=` line systemd
+  # requires.
   #
-  # This is what the systemd unit must use. `ExecStart` is `listOf str`, and
-  # systemd passes each list element to the process as ONE argv entry, with no
-  # word splitting and no quote removal. So the string form is actively harmful:
-  # `lib.escapeShellArg` wraps the whole command line in single quotes, systemd
-  # strips them and hands the process a single argument containing spaces, yargs
-  # sees one malformed flag, and `--configPath`, `--dataRoot` and `--global` are
-  # ALL silently ignored. Observed live: the server started, ignored the
-  # StateDirectory entirely, and created ~/.local/share/SillyTavern.
+  # It is NOT true that NixOS maps such a list onto systemd's argv. A NixOS
+  # `serviceConfig` is `attrsOf unitOption`, and `attrsToSection` renders a LIST
+  # as ONE `Key=` LINE PER ELEMENT — several commands, i.e. what `ExecStartPre=`
+  # is for. A multi-element `ExecStart` therefore emits several `ExecStart=`
+  # lines and systemd rejects every one that is not an executable path. See the
+  # `ExecStart` comment in modules/services.nix for the failure it causes.
+  #
+  # What MUST NOT be done is quoting the whole command line as one argument:
+  # `lib.escapeShellArg (concatStringsSep " " args)` makes systemd hand the
+  # process a single argument containing spaces, yargs sees one malformed flag,
+  # and `--configPath`, `--dataRoot` and `--global` are ALL silently ignored.
+  # Observed live: the server started, ignored the StateDirectory entirely, and
+  # created ~/.local/share/SillyTavern. Quote PER ELEMENT (`escapeShellArgs`),
+  # never the joined line.
   #
   # Empty list values are still omitted for the reason given on `renderCliArgv`.
   renderCliArgvList =

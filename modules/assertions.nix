@@ -107,24 +107,19 @@ let
     entry: !(st.modelLayers.safeComponent entry.character)
   ) modelLayerCharacters;
 
-  # `openai_max_context` is generated from `contextSize`. A hand-written value
-  # in any layer is refused rather than overwritten, because the two would
-  # disagree at runtime in a way that truncates or overflows silently.
-  modelLayerContextConflicts =
-    let
-      check =
-        where: expected: body:
-        if body ? openai_max_context && body.openai_max_context != expected then
-          [ where ]
-        else
-          [ ];
-    in
+  # Every layer that can declare a preset body, visited once. `check` receives
+  # the layer's `where` label, the catalog entry it resolves to, and the
+  # hand-written `openai` body; it returns the labels that conflict. The owned
+  # values below share this walk so a layer cannot be added to one check and
+  # forgotten in the other.
+  modelLayerConflictSites =
+    check:
     lib.concatMap (
       id:
       let
         entry = cfg.modelLayers.catalog.${id};
       in
-      check "catalog.${id}" entry.contextSize (entry.presets.openai or { })
+      check "catalog.${id}" entry (entry.presets.openai or { })
     ) modelLayerCatalogIds
     ++ lib.concatMap (
       handle:
@@ -133,23 +128,58 @@ let
         let
           entry = cfg.modelLayers.catalog.${id} or {
             contextSize = 0;
+            connection = {
+              api = "custom";
+              url = "";
+              model = "";
+            };
           };
           model = cfg.modelLayers.byUser.${handle}.models.${id} or {
             presets = { };
             characters = { };
           };
         in
-        check "byUser.${handle}.models.${id}" entry.contextSize (model.presets.openai or { })
+        check "byUser.${handle}.models.${id}" entry (model.presets.openai or { })
         ++ lib.concatLists (
           lib.mapAttrsToList (
             character: cfgEntry:
-            check "byUser.${handle}.models.${id}.characters.${character}" entry.contextSize (
+            check "byUser.${handle}.models.${id}.characters.${character}" entry (
               cfgEntry.presets.openai or { }
             )
           ) (model.characters or { })
         )
       ) (builtins.attrNames (cfg.modelLayers.byUser.${handle}.models or { }))
     ) modelLayerUsers;
+
+  # `openai_max_context` is generated from `contextSize`. A hand-written value
+  # in any layer is refused rather than overwritten, because the two would
+  # disagree at runtime in a way that truncates or overflows silently.
+  modelLayerContextConflicts = modelLayerConflictSites (
+    where: entry: body:
+    if body ? openai_max_context && body.openai_max_context != entry.contextSize then
+      [ where ]
+    else
+      [ ]
+  );
+
+  # The connection keys are generated from `connection.*`, which is documented as
+  # the one declarative source of the endpoint. A hand-written `custom_url` /
+  # `custom_model` / `chat_completion_source` in any layer would be dropped, and
+  # the preset would then point at a different backend than the manifest claims.
+  modelLayerConnectionConflicts = modelLayerConflictSites (
+    where: entry: body:
+    let
+      expected = {
+        chat_completion_source = entry.connection.api;
+        custom_url = entry.connection.url;
+        custom_model = entry.connection.model;
+      };
+      wrong = builtins.filter (key: body ? ${key} && body.${key} != expected.${key}) (
+        builtins.attrNames expected
+      );
+    in
+    if wrong == [ ] then [ ] else [ "${where} (${lib.concatStringsSep ", " wrong})" ]
+  );
 
   # A generated preset must not land on a path the operator also declared by
   # hand. `st.deepMerge` would let the generated file win silently; this turns
@@ -1831,6 +1861,23 @@ in
         character variants. Remove the hand-written value; change `contextSize`
         instead, so the SillyTavern preset and the backend's `ctx-size` can be
         kept in step.
+      '';
+    }
+    {
+      assertion = modelLayerConnectionConflicts == [ ];
+      message = ''
+        services.sillytavern-nixos: modelLayers: a model layer sets a connection key
+        (`chat_completion_source`, `custom_url` or `custom_model`) directly, and it
+        disagrees with `connection.*`.
+
+        Conflicting declarations:
+        ${lib.concatStringsSep "\n" (map (where: "  ${where}") modelLayerConnectionConflicts)}
+
+        These three keys are GENERATED from
+        `modelLayers.catalog.<id>.connection.{api,url,model}` and written into
+        every generated preset, including character variants — that is what makes
+        selecting the preset also select the backend. Remove the hand-written
+        value; change `connection.*` instead.
       '';
     }
     {

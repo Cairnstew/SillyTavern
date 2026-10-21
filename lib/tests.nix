@@ -253,15 +253,26 @@ rec {
       sc = system.config.systemd.services.sillytavern.serviceConfig;
       renderedConfig = system.config.services.sillytavern-nixos.internal.renderedConfig;
       startupTimeout = system.config.services.sillytavern-nixos.startupTimeout;
+      # The RENDERED unit, not `serviceConfig`. Reading `serviceConfig` is what
+      # let a broken unit pass every check for so long: it holds whatever NixOS
+      # was handed, and the transformation into the unit file is where the bug
+      # was. `systemd.units.<name>.text` is the exact file systemd reads.
+      unitText = system.config.systemd.units."sillytavern.service".text;
+      unitLines = lib.splitString "\n" unitText;
+      # `ExecStart=` EXACTLY — `hasPrefix` would also match `ExecStartPre=` and
+      # `ExecStartPost=`, which are different directives that legitimately occur
+      # more than once.
+      execStartLines = builtins.filter (l: lib.hasPrefix "ExecStart=" l) unitLines;
+      execStartCount = builtins.length execStartLines;
       # Precomputed here: a `runCommand` script is SHELL, so a Nix expression
-      # such as `lib.concatStringsSep` cannot appear inside it.
-      execStartJoined = lib.concatStringsSep " " sc.ExecStart;
-      # Elements containing whitespace are the failure mode being guarded
-      # against; surfaced as an eval error rather than a shell assertion.
-      execStartElementsWithSpaces = builtins.filter (e: builtins.match ".* .*" e != null) sc.ExecStart;
+      # such as `lib.concatStringsSep` cannot appear inside it. The unit text is
+      # NOT interpolated wholesale — it carries `$` and `%` specifiers that a
+      # double-quoted shell context would expand.
+      execStartJoined = lib.concatStringsSep " " execStartLines;
+      unitSetsMemoryDenyWriteExecute = builtins.any (
+        l: lib.hasPrefix "MemoryDenyWriteExecute=" l
+      ) unitLines;
     in
-    # Fails at eval time with the offending elements named.
-    assert execStartElementsWithSpaces == [ ];
     pkgs.runCommand "sillytavern-check-module-evaluates"
       {
         nativeBuildInputs = [ pkgs.coreutils ];
@@ -271,6 +282,23 @@ rec {
           echo "FAIL module-evaluates: $1" >&2
           exit 1
         }
+
+        # EXACTLY ONE `ExecStart=` line, which is the whole point of this check.
+        #
+        # A NixOS `serviceConfig` value that is a LIST is rendered by
+        # `attrsToSection` as ONE `Key=` LINE PER ELEMENT — several commands,
+        # which is what `ExecStartPre=` is for. systemd then reads each extra
+        # line as another executable and rejects it:
+        #
+        #   Neither a valid executable name nor an absolute path, ignoring: -configPath=…
+        #
+        # so the wrapper starts with no --configPath and no --dataRoot, the
+        # server falls back to ./config.yaml, and it dies EROFS under
+        # ProtectSystem=strict. Verified with `systemd-analyze verify`, which
+        # reports exactly that line for the multi-line form and nothing for the
+        # single-line one.
+        [ "${toString execStartCount}" = "1" ] \
+          || fail "expected exactly one ExecStart= line, got ${toString execStartCount}: ${execStartJoined}"
 
         # Each of these is the whole reason one part of the unit is the way it is.
         [ "${sc.StateDirectory}" = "sillytavern" ] \
@@ -285,14 +313,16 @@ rec {
         [ "${sc.TimeoutStartSec}" = "${toString startupTimeout}" ] \
           || fail "TimeoutStartSec is ${sc.TimeoutStartSec}, expected ${toString startupTimeout}"
 
+        # `MemoryDenyWriteExecute` must NOT be set: V8 allocates W+X pages for its
+        # JIT, so the directive makes mprotect fail and the server aborts with
+        # SIGTRAP at isolate init, restart-looping the unit. A consumer can still
+        # turn it on through `systemdOverrides`, so assert on the rendered unit
+        # rather than on the module source.
+        [ "${if unitSetsMemoryDenyWriteExecute then "yes" else "no"}" = "no" ] \
+          || fail "unit sets MemoryDenyWriteExecute, which crash-loops node/V8"
+
         # --configPath must point at the rendered store file and --dataRoot at the
         # state directory: together they are the reason the unit is reproducible.
-        #
-        # ExecStart is an argv LIST — one element per argument — because systemd
-        # passes each element to the process verbatim, with no word splitting and
-        # no quote removal. Joining it with spaces here is only for matching.
-        # (Interpolating a list into a Nix string is a type error, hence the
-        # explicit concatStringsSep.)
         case "${execStartJoined}" in
           *--configPath=*) ;;
           *) fail "ExecStart has no --configPath" ;;
@@ -302,10 +332,6 @@ rec {
           *) fail "ExecStart has no --dataRoot=/var/lib/sillytavern" ;;
         esac
 
-        # argv[0] is the launcher and every later element is a single flag: no
-        # element may contain a space-joined command line, which is the bug that
-        # made yargs drop every option. Asserted in Nix, not in shell — a Nix
-        # error names the offending element, a shell one does not.
         # `--global` must never be emitted. The launcher refuses it, and in that
         # mode SillyTavern ignores --configPath and --dataRoot.
         case "${execStartJoined}" in
@@ -1858,8 +1884,10 @@ rec {
   # `moduleEvaluates` pins exactly ONE of the ~26 hardening directives
   # (`ProtectSystem`), and nothing in the suite mentions `NoNewPrivileges`,
   # `SystemCallFilter`, `CapabilityBoundingSet`, `RestrictAddressFamilies`,
-  # `MemoryDenyWriteExecute`, `ProtectHome` and the rest. Deleting or loosening
-  # any of them is therefore invisible.
+  # `ProtectHome` and the rest. Deleting or loosening any of them is therefore
+  # invisible. (`MemoryDenyWriteExecute` is the exception in the other
+  # direction: `hardeningPinned` FORBIDS it, because it is fatal to V8 — see
+  # the `forbidden` attrset below.)
   #
   # That is a real exposure rather than a theoretical one: this unit runs a
   # Node server that parses attacker-controlled JSON and renders user-supplied
@@ -2505,7 +2533,7 @@ rec {
         ProtectControlGroups = true;
         NoNewPrivileges = true;
         LockPersonality = true;
-        MemoryDenyWriteExecute = true;
+        # `MemoryDenyWriteExecute` is deliberately NOT here — see `forbidden`.
         # Capabilities
         RestrictSUIDSGID = true;
         RestrictRealtime = true;
@@ -2537,10 +2565,37 @@ rec {
 
       missing = builtins.filter (k: !(sc ? ${k})) (builtins.attrNames expected);
       wrong = builtins.filter (k: flat sc.${k} != flat expected.${k}) (builtins.attrNames expected);
+
+      # Directives that must NOT be set, each with the reason. `expected` alone
+      # cannot catch a directive being ADDED, and that is exactly how
+      # `MemoryDenyWriteExecute` got in: it reads as hardening, and it is fatal
+      # to any JIT runtime. The module also asserts this on the RENDERED unit
+      # (see `moduleEvaluates`), because a consumer can re-add it through
+      # `systemdOverrides` without this attrset ever seeing it.
+      forbidden = {
+        # Node's V8 allocates W+X pages for its JIT, so the directive makes
+        # mprotect fail and the process aborts with SIGTRAP at isolate init
+        # (`v8::base::OS::SetPermissions` → `CodeRange::InitReservation` →
+        # `node::NewIsolate`). The unit then restart-loops. The JVM and .NET are
+        # in the same position.
+        MemoryDenyWriteExecute = "crash-loops node/V8 (SIGTRAP at isolate init)";
+      };
+
+      forbiddenSet = builtins.filter (k: sc ? ${k}) (builtins.attrNames forbidden);
     in
     # An eval-time failure naming every offender, rather than a shell one.
-    assert missing == [ ];
-    assert wrong == [ ];
+    assert lib.assertMsg (missing == [ ]) ''
+      hardening-pinned: directive(s) missing from the unit: ${
+        lib.concatStringsSep ", " missing
+      }'';
+    assert lib.assertMsg (wrong == [ ]) ''
+      hardening-pinned: directive(s) set to the wrong value: ${
+        lib.concatStringsSep ", " wrong
+      }'';
+    assert lib.assertMsg (forbiddenSet == [ ]) ''
+      hardening-pinned: directive(s) that must not be set: ${
+        lib.concatStringsSep ", " (map (k: "${k} — ${forbidden.${k}}") forbiddenSet)
+      }'';
     pkgs.runCommand "sillytavern-check-hardening-pinned" { }
       ''
         echo "PASS hardening-pinned (${toString (builtins.length (builtins.attrNames expected))} directives)"
@@ -2901,9 +2956,60 @@ rec {
     assert manifest.json.models.m1.presets.openai == "m1";
     assert manifest.json.models.m1.characters.Aria.openai == "m1 ~ Aria";
     assert files ? "OpenAI Settings/m1 ~ Aria.json";
+    # The connection is rendered INTO the preset body. An account has ONE
+    # `oai_settings`, so this is the only per-model slot upstream has: selecting
+    # the preset is then what points the account at this model's backend
+    # (`onSettingsPresetChange`, gated by the global `bind_preset_to_connection`,
+    # whose upstream default is true).
+    assert files."OpenAI Settings/m1.json".json.chat_completion_source == "custom";
+    assert files."OpenAI Settings/m1.json".json.custom_url == "http://127.0.0.1:9931/v1";
+    assert files."OpenAI Settings/m1.json".json.custom_model == "m1";
+    # Character variants carry it too — without it, switching to a character
+    # variant would silently keep whatever backend the account already had.
+    assert files."OpenAI Settings/m1 ~ Aria.json".json.custom_url == "http://127.0.0.1:9931/v1";
+    assert files."OpenAI Settings/m1 ~ Aria.json".json.custom_model == "m1";
     pkgs.runCommand "sillytavern-check-model-layers-files" { }
       ''
-        echo "PASS model-layers-files (artifact paths, policies, manifest)"
+        echo "PASS model-layers-files (artifact paths, policies, manifest, connection)"
+        touch "$out"
+      '';
+
+  # `connection.*` is the single declarative source of the endpoint, so a
+  # hand-written connection key in any layer must be refused rather than
+  # silently dropped. Mirrors `modelLayersContextSize`.
+  modelLayersConnection =
+    pkgs:
+    let
+      base = {
+        enable = true;
+        catalog."m1" = {
+          contextSize = 16384;
+          connection = {
+            url = "http://127.0.0.1:9931/v1";
+            model = "m1";
+          };
+          presets.openai = { temp_openai = 0.5; };
+        };
+      };
+      catalogConflict = base // {
+        catalog."m1" = base.catalog."m1" // {
+          presets.openai.custom_url = "http://wrong.invalid:1/v1";
+        };
+      };
+      userConflict = base // {
+        byUser.seanc.models."m1".presets.openai.custom_model = "wrong-model";
+      };
+      charConflict = base // {
+        byUser.seanc.models."m1".characters."Aria".presets.openai.chat_completion_source = "openai";
+      };
+    in
+    assert stModelLayerFailures pkgs base == [ ];
+    assert builtins.length (stModelLayerFailures pkgs catalogConflict) >= 1;
+    assert builtins.length (stModelLayerFailures pkgs userConflict) >= 1;
+    assert builtins.length (stModelLayerFailures pkgs charConflict) >= 1;
+    pkgs.runCommand "sillytavern-check-model-layers-connection" { }
+      ''
+        echo "PASS model-layers-connection (connection rendered, drift refused)"
         touch "$out"
       '';
 
@@ -3120,6 +3226,7 @@ rec {
       modelLayersStableIds = modelLayersStableIds pkgs;
       modelLayersCharacterNames = modelLayersCharacterNames pkgs;
       modelLayersContextSize = modelLayersContextSize pkgs;
+      modelLayersConnection = modelLayersConnection pkgs;
       modelLayersContextMatchesBackend = modelLayersContextMatchesBackend pkgs;
       llamaCudaVariantAvailable = llamaCudaVariantAvailable pkgs;
     };

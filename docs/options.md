@@ -614,7 +614,7 @@ already switches by name:
 
 | Layer | Generated artifact |
 |---|---|
-| catalog (per model) | `OpenAI Settings/<presetName>.json` with sampling, `extensions`, and `openai_max_context`; optional Text Completion / Instruct / Context / Sysprompt / Reasoning presets |
+| catalog (per model) | `OpenAI Settings/<presetName>.json` with sampling, `extensions`, `openai_max_context`, and the three connection keys (`chat_completion_source`, `custom_url`, `custom_model`); optional Text Completion / Instruct / Context / Sysprompt / Reasoning presets |
 | `byUser.<handle>` | the same files, with that account's leaves merged in |
 | `byUser.<handle>.models.<id>.characters.<name>` | `OpenAI Settings/<presetName> ~ <name>.json`, carrying the model preset plus the character's overrides |
 | every handle | `user/files/st-model-layers.json`, the manifest |
@@ -629,7 +629,7 @@ services.sillytavern-nixos.modelLayers = {
       url = "http://127.0.0.1:9931/v1";
       model = "gemma-4-e4b";
     };
-    presets.openai = { temp_openai = 0.7; bind_preset_to_connection = true; };
+    presets.openai = { temp_openai = 0.7; };
   };
   byUser.seanc.models."gemma-4-e4b" = {
     presets.openai.temp_openai = 0.9;
@@ -637,6 +637,24 @@ services.sillytavern-nixos.modelLayers = {
   };
 };
 ```
+
+**Selecting the preset selects the backend.** `connection.*` is rendered into every
+generated preset as `chat_completion_source`, `custom_url` and `custom_model`, because
+an account has ONE `oai_settings` and that preset body is the only per-model slot
+upstream has. Upstream applies them from the preset when it is selected
+(`onSettingsPresetChange` in `public/scripts/openai.js`) — **provided**
+`oai_settings.bind_preset_to_connection` is true. That is a global settings key, NOT
+one of the keys a preset can carry, so setting it in `presets.openai` does nothing;
+upstream defaults it to `true`, and if an account has turned it off the preset applies
+sampling only. Set it declaratively if you need to be sure:
+
+```nix
+services.sillytavern-nixos.settings.common.oai_settings.bind_preset_to_connection = true;
+```
+
+The three connection keys are generator-owned, exactly like `openai_max_context`: a
+hand-written value in any layer that disagrees with `connection.*` is an evaluation
+error instead of a silent overwrite.
 
 The merge order is exactly the hierarchy:
 
@@ -654,13 +672,13 @@ The generated presets use `policy = "missing"`: a preset you tune in the UI
 survives `nixos-rebuild`. The manifest is the exception — it is derived state,
 so it uses `overwrite`.
 
-**What this version does not do.** There is no runtime resolver yet. The
-presets appear in the UI's dropdowns and are selected like any other preset; a
-client extension that switches profile and preset on model/character change is
-the next phase. When it lands it must **append** a Connection Profile with the
-manifest's stable id if it is missing, and never seed or rewrite
-`extension_settings.connectionManager.profiles`: that is a JSON *array* the
-user owns, and this project's deep-merge replaces arrays wholesale.
+**What this version does not do.** It does not switch preset automatically. The
+presets appear in the UI's dropdowns, and selecting one now brings its backend
+with it, but nothing watches for a model or character change and selects the
+matching preset for you. A client extension that does that — and that **appends**
+a Connection Profile with the manifest's stable id if it is missing, never
+seeding or rewriting `extension_settings.connectionManager.profiles`, which is a
+JSON *array* the user owns — is the next phase.
 
 ## What this module writes at the data root
 

@@ -55,25 +55,34 @@
   nodejs,
   writeShellApplication,
   fetchgit,
+  cacert,
   src ? null,
   version ? "1.19.0",
   # The NAR hash of `node ci` against this repository's package-lock.json.
   # Changing the lockfile, or bumping nixpkgs' npm, changes it — re-derive with
   # `nix build .#sillytavern` and read the "got:" line out of the error.
   nodeModulesHash ? "sha256-c1DYkaY0sN4USmQIIF5uj0StiVFnk7/J3rtwDq1VT8o=",
-  # A PEM bundle of extra certificate authorities for the `npm ci` step.
+  # A PEM bundle of certificate authorities for the `npm ci` step.
   #
-  # Needed on any network that intercepts TLS — a corporate proxy, a CI runner
-  # with a custom root, a Nix builder behind a filtering middlebox. Node does NOT
-  # read the system CA store; it uses the bundle compiled into the binary, so
-  # `curl` and `git` can both succeed while `npm` fails with
-  # UNABLE_TO_GET_ISSUER_CERT_LOCALLY. Point this at the system bundle:
+  # Node does NOT read the system CA store; it uses the bundle compiled into the
+  # binary. Inside the build sandbox there is no system store to fall back to at
+  # all, so with this unset `npm ci` fails against ANY registry:
   #
-  #   caCertFile = /etc/ssl/certs/ca-certificates.crt;
+  #   npm error code UNABLE_TO_GET_ISSUER_CERT_LOCALLY
+  #   npm error request to https://registry.npmjs.org/zod/-/zod-3.24.2.tgz failed
   #
-  # It is an INPUT to the fixed-output hash's derivation, not a secret, and null
-  # (the default) leaves Node's own trust store in place.
-  caCertFile ? null,
+  # The default is nixpkgs' `cacert` — a STORE PATH, which the sandbox can read,
+  # unlike a host path such as `/etc/ssl/certs/…`. nixpkgs' `cacert` is
+  # `nss-cacert`, whose bundle is `etc/ssl/certs/ca-bundle.crt`; there is no
+  # `ca-certificates.crt` inside the store path, and pointing at one makes Node
+  # warn "Ignoring extra certs … load failed" and then fail exactly as above.
+  #
+  # Set this to `null` only to reproduce Node's own trust store deliberately, and
+  # note that a build sandbox has none.
+  #
+  # It is an INPUT to the fixed-output derivation's build, not a secret: it does
+  # not change `node_modules`' contents, so `nodeModulesHash` is unaffected.
+  caCertFile ? "${cacert}/etc/ssl/certs/ca-bundle.crt",
   ...
 }:
 

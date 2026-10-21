@@ -276,12 +276,16 @@ let
   launcher = pkgs.writeShellApplication {
     name = "llama-cpp-service";
     runtimeInputs = [ pkgs.coreutils ];
+    # Split assignment from `export`: `export FOO="$(cmd)"` masks the command's
+    # exit status and shellcheck flags it (SC2155); `set -a` / `set +a` is worse,
+    # because shellcheck does not model it at all and reads the bare assignment
+    # as an unused variable (SC2034). nixpkgs' `writeShellApplication` runs
+    # shellcheck at default severity, where either warning is fatal.
     text = ''
-      set -a
       if [ -n "''${CREDENTIALS_DIRECTORY:-}" ] && [ -f "''${CREDENTIALS_DIRECTORY}/api-key" ]; then
         LLAMA_ARG_API_KEY="$(cat "''${CREDENTIALS_DIRECTORY}/api-key")"
+        export LLAMA_ARG_API_KEY
       fi
-      set +a
       exec ${lib.getExe' cfg.package "llama"} serve
     '';
   };
