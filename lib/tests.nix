@@ -143,16 +143,18 @@ rec {
     builtins.filter (e: builtins.match pattern e.message != null) (inspectedAssertions cfg).ourFailures;
 
   # A Nix system with the module imported and the module's options available.
-  evalSystem =
-    pkgs: module:
+  # The bootstrap every eval check starts from, shared so a check can put
+  # EITHER module in scope. The two services are deliberately independent
+  # (they do not read each other's options), so the harness must be able to
+  # evaluate one without the other.
+  evalWith =
+    pkgs: modules:
     nixpkgs.lib.nixosSystem {
       # `pkgs.stdenv.hostPlatform.system` rather than `pkgs.system`, which is
       # deprecated and emits an evaluation warning that would drown out real
       # output on every `nix flake check`.
       system = pkgs.stdenv.hostPlatform.system;
-      modules = [
-        module
-        modulePath
+      modules = modules ++ [
         {
           # No bootloader and no real root filesystem: this is an evaluation
           # test, not a VM, and skipping them keeps each system well under a
@@ -175,6 +177,9 @@ rec {
         }
       ];
     };
+
+  evalSystem = pkgs: module: evalWith pkgs [ module modulePath ];
+  evalLlama = pkgs: module: evalWith pkgs [ module ../modules/llama.nix ];
 
   # ── 0. The module, the overlay and the flake agree on ONE package ───────────
   #
@@ -2508,6 +2513,404 @@ rec {
         touch "$out"
       '';
 
+  # ── llama.cpp server ───────────────────────────────────────────────────────
+  #
+  # The backend is a separate module, so these evaluate it WITHOUT the
+  # SillyTavern module. That is the cross-module independence the design
+  # promises, and it is also what makes the check cheap.
+  llamaPresetRendered =
+    pkgs:
+    let
+      apiKey = pkgs.writeText "llama-api-key" "not-a-real-key";
+      storeWeights = pkgs.writeText "model-a.gguf" "not a real gguf";
+      plainWeights = "/var/lib/llama/model-b.gguf";
+      system = evalLlama pkgs {
+        services.llama-cpp-nixos = {
+          enable = true;
+          apiKeyFile = apiKey;
+          models."model/a" = {
+            weights.path = storeWeights;
+            ctxSize = 16384;
+            primary = true;
+            args = {
+              ngl = "all";
+              np = 2;
+              "chat-template" = "gemma";
+              jinja = true;
+            };
+          };
+          models."model-b" = {
+            weights.path = plainWeights;
+            ctxSize = 8192;
+          };
+          globalArgs = { c = 4096; };
+        };
+      };
+      cfg = system.config.services.llama-cpp-nixos;
+      ini = cfg.internal.modelsPreset;
+      unit = system.config.systemd.services.llama-cpp-nixos;
+    in
+    assert lib.hasInfix "version = 1" ini;
+    assert lib.hasInfix "[*]" ini;
+    assert lib.hasInfix "[model/a]" ini;
+    assert lib.hasInfix "[model-b]" ini;
+    assert lib.hasInfix "c = 16384" ini;
+    assert lib.hasInfix "c = 8192" ini;
+    assert lib.hasInfix "load-on-startup = true" ini;
+    assert lib.hasInfix "load-on-startup = false" ini;
+    assert lib.hasInfix "ngl = all" ini;
+    assert lib.hasInfix "np = 2" ini;
+    assert lib.hasInfix "chat-template = gemma" ini;
+    assert lib.hasInfix "jinja = true" ini;
+    # A plain path, not a store path: `lib.hasInfix` refuses a store path in
+    # its regular expression (see RUN-LOG). The store-backed model is covered
+    # by the section assertion above.
+    assert lib.hasInfix "model = ${plainWeights}" ini;
+    # The unit is wired to the rendered file, not merely aware of it.
+    assert unit.environment.LLAMA_ARG_MODELS_PRESET == cfg.internal.presetFile;
+    assert unit.environment.LLAMA_ARG_HOST == "127.0.0.1";
+    assert unit.environment.LLAMA_ARG_PORT == "9931";
+    assert unit.environment.LLAMA_CACHE == "/var/lib/llama-cpp/cache";
+    assert unit.serviceConfig.StateDirectory == "llama-cpp";
+    assert unit.serviceConfig.User == "llama-cpp";
+    assert unit.serviceConfig.LoadCredential == "api-key:${toString apiKey}";
+    pkgs.runCommand "sillytavern-check-llama-preset" { }
+      ''
+        echo "PASS llama-preset (sections, context, eager primary, credential)"
+        touch "$out"
+      '';
+
+  llamaAssertions =
+    pkgs:
+    let
+      failures =
+        llamaConfig:
+        let
+          system = evalLlama pkgs { services.llama-cpp-nixos = llamaConfig; };
+        in
+        builtins.filter (
+          a: !a.assertion && lib.hasInfix "services.llama-cpp-nixos:" (a.message or "")
+        ) system.config.assertions;
+      count = llamaConfig: builtins.length (failures llamaConfig);
+      model = extra: {
+        weights.path = "/var/lib/llama/m.gguf";
+        primary = true;
+      } // extra;
+      base = {
+        enable = true;
+        models."m" = model { };
+      };
+    in
+    assert count base == 0;
+    # No primary.
+    assert count (base // { models."m" = model { primary = false; }; }) == 1;
+    # Two primaries.
+    assert count (base // { models = { "m" = model { }; "m2" = model { }; }; }) == 1;
+    # Both weights sources.
+    assert count (
+      base
+      // {
+        models."m" = model {
+          weights = {
+            path = "/var/lib/llama/m.gguf";
+            url = "https://example.invalid/m.gguf";
+            hash = "sha256-0000000000000000000000000000000000000000000=";
+          };
+        };
+      }
+    ) == 1;
+    # Neither weights source.
+    assert count (base // { models."m" = model { weights = { }; }; }) == 1;
+    # A reserved key in `args`.
+    assert count (base // { models."m" = model { args = { c = 4096; }; }; }) == 1;
+    # `model` in the global section.
+    assert count (base // { globalArgs = { model = "/var/lib/llama/m.gguf"; }; }) == 1;
+    # An id that would break the INI structure.
+    assert count (
+      base // { models = { "bad]id" = model { }; "m" = model { primary = false; }; }; }
+    ) == 1;
+    pkgs.runCommand "sillytavern-check-llama-assertions" { }
+      ''
+        echo "PASS llama-assertions (primary, weights, reserved keys, section names)"
+        touch "$out"
+      '';
+
+  # ── Model layers (SillyTavern side) ────────────────────────────────────────
+  stModelLayerSystem =
+    pkgs: modelLayers:
+    evalSystem pkgs {
+      services.sillytavern-nixos = {
+        enable = true;
+        config.enableUserAccounts = true;
+        users.seanc.passwordFile = pkgs.writeText "pw" "not-a-real-password";
+        inherit modelLayers;
+      };
+    };
+
+  # Only the model-layer assertions. A valid config can still fail unrelated
+  # module assertions (there is no authentication configured in this minimal
+  # system), so filtering by the subject is what makes "good == []" meaningful.
+  stModelLayerFailures =
+    pkgs: modelLayers:
+    builtins.filter (
+      a: !a.assertion && lib.hasInfix "services.sillytavern-nixos: modelLayers:" (a.message or "")
+    ) (stModelLayerSystem pkgs modelLayers).config.assertions;
+
+  modelLayersPrecedence =
+    pkgs:
+    let
+      system = stModelLayerSystem pkgs {
+        enable = true;
+        catalog."m1" = {
+          contextSize = 16384;
+          connection = {
+            url = "http://127.0.0.1:9931/v1";
+            model = "m1";
+          };
+          presets.openai = {
+            temp_openai = 0.5;
+            top_p_openai = 0.9;
+          };
+        };
+        byUser.seanc.models."m1".presets.openai = {
+          temp_openai = 0.7;
+        };
+        byUser.seanc.models."m1".characters."Aria".presets.openai = {
+          temp_openai = 0.9;
+        };
+      };
+      files = system.config.services.sillytavern-nixos.internal.seedSpecJson.users.seanc.files;
+      modelPreset = files."OpenAI Settings/m1.json".json;
+      charPreset = files."OpenAI Settings/m1 ~ Aria.json".json;
+    in
+    # PER MODEL: the catalogue value applies.
+    # PER USER: the user's leaf wins, and the sibling it did not restate
+    # survives (this is a DEEP merge, not `//`).
+    assert modelPreset.temp_openai == 0.7;
+    assert modelPreset.top_p_openai == 0.9;
+    assert modelPreset.openai_max_context == 16384;
+    # PER CHARACTER: the character's leaf wins over the user's.
+    assert charPreset.temp_openai == 0.9;
+    assert charPreset.top_p_openai == 0.9;
+    assert charPreset.openai_max_context == 16384;
+    pkgs.runCommand "sillytavern-check-model-layers-precedence" { }
+      ''
+        echo "PASS model-layers-precedence (catalog -> user -> character)"
+        touch "$out"
+      '';
+
+  modelLayersFiles =
+    pkgs:
+    let
+      system = stModelLayerSystem pkgs {
+        enable = true;
+        catalog."m1" = {
+          contextSize = 16384;
+          connection = {
+            url = "http://127.0.0.1:9931/v1";
+            model = "m1";
+          };
+          presets = {
+            openai = { temp_openai = 0.5; };
+            instruct = { input_sequence = "<|user|>"; };
+          };
+        };
+        byUser.seanc.models."m1".characters."Aria" = { };
+      };
+      files = system.config.services.sillytavern-nixos.internal.seedSpecJson.users.seanc.files;
+      manifest = files."user/files/st-model-layers.json";
+    in
+    # Presets are user-editable: create-only.
+    assert files."OpenAI Settings/m1.json".policy == "missing";
+    assert files."instruct/m1.json".policy == "missing";
+    # The advanced bucket gets its label injected, as every other preset does.
+    assert files."instruct/m1.json".json.name == "m1";
+    # Empty buckets are not emitted.
+    assert !(files ? "context/m1.json");
+    # The manifest is DERIVED state: it must be rewritten, or a stale one
+    # would describe models that no longer exist.
+    assert manifest.policy == "overwrite";
+    assert manifest.json.version == 1;
+    assert manifest.json.models.m1.connection.id == st.modelLayers.profileId "m1";
+    assert manifest.json.models.m1.connection.model == "m1";
+    assert manifest.json.models.m1.presets.openai == "m1";
+    assert manifest.json.models.m1.characters.Aria.openai == "m1 ~ Aria";
+    assert files ? "OpenAI Settings/m1 ~ Aria.json";
+    pkgs.runCommand "sillytavern-check-model-layers-files" { }
+      ''
+        echo "PASS model-layers-files (artifact paths, policies, manifest)"
+        touch "$out"
+      '';
+
+  modelLayersStableIds =
+    pkgs:
+    let
+      a = st.modelLayers.profileId "a/b";
+      b = st.modelLayers.profileId "a:b";
+    in
+    assert lib.hasPrefix "st-nix-a-b-" a;
+    # The slug alone collapses `/` and `:` to the same string; the digest is
+    # what keeps two models from sharing one profile.
+    assert a != b;
+    assert st.modelLayers.profileId "a/b" == a;
+    pkgs.runCommand "sillytavern-check-model-layers-stable-ids" { }
+      ''
+        echo "PASS model-layers-stable-ids (stable and collision-free)"
+        touch "$out"
+      '';
+
+  modelLayersCharacterNames =
+    pkgs:
+    let
+      good = {
+        "Aria" = { };
+        "Aria Chen" = { };
+        "Aria (v2)" = { };
+        "Aria's" = { };
+      };
+      base = {
+        enable = true;
+        catalog."m1" = {
+          connection = {
+            url = "http://127.0.0.1:9931/v1";
+            model = "m1";
+          };
+        };
+      };
+      withChars = characters: base // { byUser.seanc.models."m1".characters = characters; };
+      goodSystem = stModelLayerSystem pkgs (withChars good);
+      goodFiles = goodSystem.config.services.sillytavern-nixos.internal.seedSpecJson.users.seanc.files;
+      bad = stModelLayerFailures pkgs (withChars { "A/B" = { }; });
+      dot = stModelLayerFailures pkgs (withChars { "." = { }; });
+      space = stModelLayerFailures pkgs (withChars { " Aria" = { }; });
+    in
+    assert stModelLayerFailures pkgs (withChars good) == [ ];
+    assert builtins.length bad >= 1;
+    assert builtins.length dot >= 1;
+    assert builtins.length space >= 1;
+    # A legal name with a space produces a real, readable file.
+    assert goodFiles ? "OpenAI Settings/m1 ~ Aria Chen.json";
+    pkgs.runCommand "sillytavern-check-model-layers-character-names" { }
+      ''
+        echo "PASS model-layers-character-names (safe names accepted, unsafe refused)"
+        touch "$out"
+      '';
+
+  modelLayersContextSize =
+    pkgs:
+    let
+      base = {
+        enable = true;
+        catalog."m1" = {
+          contextSize = 16384;
+          connection = {
+            url = "http://127.0.0.1:9931/v1";
+            model = "m1";
+          };
+        };
+      };
+      files = (stModelLayerSystem pkgs base).config.services.sillytavern-nixos.internal.seedSpecJson.users.seanc.files;
+      catalogConflict = base // {
+        catalog."m1" = base.catalog."m1" // {
+          presets.openai.openai_max_context = 8192;
+        };
+      };
+      userConflict = base // {
+        byUser.seanc.models."m1".presets.openai.openai_max_context = 8192;
+      };
+      charConflict = base // {
+        byUser.seanc.models."m1".characters."Aria".presets.openai.openai_max_context = 8192;
+      };
+    in
+    # Generated, not hand-written.
+    assert files."OpenAI Settings/m1.json".json.openai_max_context == 16384;
+    # And a hand-written disagreement is refused in every layer.
+    assert builtins.length (stModelLayerFailures pkgs catalogConflict) >= 1;
+    assert builtins.length (stModelLayerFailures pkgs userConflict) >= 1;
+    assert builtins.length (stModelLayerFailures pkgs charConflict) >= 1;
+    pkgs.runCommand "sillytavern-check-model-layers-context-size" { }
+      ''
+        echo "PASS model-layers-context-size (openai_max_context cannot drift)"
+        touch "$out"
+      '';
+
+  # The two modules are independent by design, so the model id and the context
+  # size are a CONTRACT rather than a cross-module read. This is the check that
+  # pins it: one system, both modules, the same id and the same number, and the
+  # number appears in BOTH artifacts — `openai_max_context` in the preset and
+  # `c` in the llama.cpp INI section. It also proves the two modules can be
+  # enabled together without an option or unit collision.
+  modelLayersContextMatchesBackend =
+    pkgs:
+    let
+      system = evalWith pkgs [
+        {
+          services.llama-cpp-nixos = {
+            enable = true;
+            models."m1" = {
+              weights.path = "/var/lib/llama/m1.gguf";
+              ctxSize = 16384;
+              primary = true;
+            };
+          };
+          services.sillytavern-nixos = {
+            enable = true;
+            config.enableUserAccounts = true;
+            users.seanc.passwordFile = pkgs.writeText "pw" "not-a-real-password";
+            modelLayers = {
+              enable = true;
+              catalog."m1" = {
+                contextSize = 16384;
+                connection = {
+                  url = "http://127.0.0.1:9931/v1";
+                  model = "m1";
+                };
+              };
+            };
+          };
+        }
+        ../modules/llama.nix
+        modulePath
+      ];
+      stFiles = system.config.services.sillytavern-nixos.internal.seedSpecJson.users.seanc.files;
+      ini = system.config.services.llama-cpp-nixos.internal.modelsPreset;
+    in
+    assert stFiles."OpenAI Settings/m1.json".json.openai_max_context == 16384;
+    assert lib.hasInfix "[m1]" ini;
+    assert lib.hasInfix "c = 16384" ini;
+    pkgs.runCommand "sillytavern-check-model-layers-context-matches-backend" { }
+      ''
+        echo "PASS model-layers-context-matches-backend (preset and INI agree)"
+        touch "$out"
+      '';
+
+  # The flake's own package set allows unfree so the CUDA variant this project
+  # targets is usable. This check proves the seam end to end: the attribute
+  # evaluates, and the module accepts it as `package` without touching the
+  # module's default (a CPU build remains the portable default).
+  llamaCudaVariantAvailable =
+    pkgs:
+    let
+      cuda = pkgs.llama-cpp-cuda;
+      system = evalLlama pkgs {
+        services.llama-cpp-nixos = {
+          enable = true;
+          package = cuda;
+          models."m" = {
+            weights.path = "/var/lib/llama/m.gguf";
+            primary = true;
+          };
+        };
+      };
+    in
+    assert lib.isDerivation cuda;
+    assert system.config.services.llama-cpp-nixos.package == cuda;
+    pkgs.runCommand "sillytavern-check-llama-cuda-variant" { }
+      ''
+        echo "PASS llama-cuda-variant (unfree package set, selectable package)"
+        touch "$out"
+      '';
+
   checks =
     pkgs:
     {
@@ -2543,7 +2946,15 @@ rec {
       presetsRendered = presetsRendered pkgs;
       hardeningPinned = hardeningPinned pkgs;
       libHelpers = libHelpers pkgs;
-    };
+      llamaPresetRendered = llamaPresetRendered pkgs;
+      llamaAssertions = llamaAssertions pkgs;
+      modelLayersPrecedence = modelLayersPrecedence pkgs;
+      modelLayersFiles = modelLayersFiles pkgs;
+      modelLayersStableIds = modelLayersStableIds pkgs;
+      modelLayersCharacterNames = modelLayersCharacterNames pkgs;
+      modelLayersContextSize = modelLayersContextSize pkgs;
+      modelLayersContextMatchesBackend = modelLayersContextMatchesBackend pkgs;
+      llamaCudaVariantAvailable = llamaCudaVariantAvailable pkgs;    };
 
   packages = pkgs: { };
 }

@@ -450,8 +450,48 @@ let
     ++ lib.attrNames cfg.settings.byUser
     ++ lib.attrNames cfg.files.byUser
     ++ lib.attrNames cfg.presets.byUser
+    ++ lib.attrNames cfg.modelLayers.byUser
     ++ lib.attrNames cfg.secrets.byUser
   );
+
+  # ── Model layers, resolved per handle ─────────────────────────────────────
+  #
+  # The generator is pure (`lib/model-layers.nix`): it turns the catalogue and
+  # this account's deltas into preset buckets plus a manifest. `null` when the
+  # feature is off, so the seed spec is byte-for-byte what it was before this
+  # option existed.
+  #
+  # The manifest is the ONE generated file whose policy is `overwrite`. It is
+  # derived state that nothing in the UI edits, so create-only would freeze the
+  # first version forever. The presets it describes use `missing`, because the
+  # operator may legitimately tune them in the UI and expect that to survive a
+  # rebuild.
+  modelLayerFor =
+    handle:
+    if cfg.modelLayers.enable then
+      st.modelLayers.resolveForHandle {
+        catalog = cfg.modelLayers.catalog;
+        user = cfg.modelLayers.byUser.${handle} or { };
+      }
+    else
+      null;
+
+  modelLayerFiles =
+    handle:
+    if cfg.modelLayers.enable then st.mkPresetFiles (modelLayerFor handle).presets else { };
+
+  modelLayerManifestFile =
+    handle:
+    if cfg.modelLayers.enable then
+      {
+        "user/files/st-model-layers.json" = {
+          json = (modelLayerFor handle).manifest;
+          policy = "overwrite";
+          mode = null;
+        };
+      }
+    else
+      { };
 
   # The spec as a Nix attrset, built once and rendered twice: `seedSpec` is the
   # store file the activation script reads, `seedSpecJson` is the same value
@@ -549,12 +589,19 @@ let
           # wins. Declaring the same path in both is caught by an assertion
           # rather than silently resolved here.
           files = normaliseFiles (
-            st.deepMerge
-              (st.deepMerge
-                (st.mkPresetFiles cfg.presets.common)
-                (st.mkPresetFiles (cfg.presets.byUser.${handle} or {}))
-              )
-              (st.deepMerge cfg.files.common (cfg.files.byUser.${handle} or {}))
+            (
+              st.deepMerge
+                (
+                  st.deepMerge
+                    (st.deepMerge
+                      (st.mkPresetFiles cfg.presets.common)
+                      (st.mkPresetFiles (cfg.presets.byUser.${handle} or {}))
+                    )
+                    (st.deepMerge cfg.files.common (cfg.files.byUser.${handle} or {}))
+                )
+                (modelLayerFiles handle)
+            )
+            // (modelLayerManifestFile handle)
           );
           # PATHS ONLY. A secret's bytes are read by the seeder at activation,
           # so nothing about the key itself reaches this file, the store, or

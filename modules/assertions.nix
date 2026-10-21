@@ -44,8 +44,150 @@ let
     lib.attrNames cfg.settings.byUser
     ++ lib.attrNames cfg.files.byUser
     ++ lib.attrNames cfg.presets.byUser
+    ++ lib.attrNames cfg.modelLayers.byUser
     ++ lib.attrNames cfg.secrets.byUser
   );
+
+  # ── Model layers ───────────────────────────────────────────────────────────
+  #
+  # The generator is pure, so these predicates can resolve the same tree the
+  # seed spec will contain and report the exact declaration that is wrong. The
+  # four that matter are: an id that is not in the catalogue, a name that is not
+  # a safe file name, a character name that is not either, and a hand-written
+  # `openai_max_context` that disagrees with `contextSize`.
+  modelLayerCatalogIds = builtins.attrNames cfg.modelLayers.catalog;
+
+  modelLayerUsers = builtins.attrNames cfg.modelLayers.byUser;
+
+  modelLayerDeclaredIds = lib.unique (
+    lib.concatMap (
+      handle: builtins.attrNames (cfg.modelLayers.byUser.${handle}.models or { })
+    ) modelLayerUsers
+  );
+
+  modelLayerUnknownIds = builtins.filter (
+    id: !(builtins.elem id modelLayerCatalogIds)
+  ) modelLayerDeclaredIds;
+
+  modelLayerPresetName =
+    id:
+    let
+      entry = cfg.modelLayers.catalog.${id};
+    in
+    if entry.presetName != null then entry.presetName else st.modelLayers.defaultPresetName id;
+
+  modelLayerUnsafePresetNames = builtins.filter (
+    id: !(st.modelLayers.safeComponent (modelLayerPresetName id))
+  ) modelLayerCatalogIds;
+
+  # Two catalogue entries whose names collapse to the same preset file would
+  # silently overwrite each other in `mergeAttrsList`. `defaultPresetName`
+  # replaces `/` with `-`, so `a/b` and `a-b` collide — exactly the case a
+  # filename check misses.
+  modelLayerPresetNameCollisions = lib.unique (
+    builtins.filter (
+      name:
+      builtins.length (builtins.filter (other: other == name) (map modelLayerPresetName modelLayerCatalogIds)) > 1
+    ) (map modelLayerPresetName modelLayerCatalogIds)
+  );
+
+  # Every declared character, tagged with where it came from so the message can
+  # name the declaration rather than just the string.
+  modelLayerCharacters = lib.concatMap (
+    handle:
+    lib.concatMap (
+      id:
+      lib.mapAttrsToList (character: _: {
+        inherit handle id character;
+      }) (cfg.modelLayers.byUser.${handle}.models.${id}.characters or { })
+    ) (builtins.attrNames (cfg.modelLayers.byUser.${handle}.models or { }))
+  ) modelLayerUsers;
+
+  modelLayerUnsafeCharacters = builtins.filter (
+    entry: !(st.modelLayers.safeComponent entry.character)
+  ) modelLayerCharacters;
+
+  # `openai_max_context` is generated from `contextSize`. A hand-written value
+  # in any layer is refused rather than overwritten, because the two would
+  # disagree at runtime in a way that truncates or overflows silently.
+  modelLayerContextConflicts =
+    let
+      check =
+        where: expected: body:
+        if body ? openai_max_context && body.openai_max_context != expected then
+          [ where ]
+        else
+          [ ];
+    in
+    lib.concatMap (
+      id:
+      let
+        entry = cfg.modelLayers.catalog.${id};
+      in
+      check "catalog.${id}" entry.contextSize (entry.presets.openai or { })
+    ) modelLayerCatalogIds
+    ++ lib.concatMap (
+      handle:
+      lib.concatMap (
+        id:
+        let
+          entry = cfg.modelLayers.catalog.${id} or {
+            contextSize = 0;
+          };
+          model = cfg.modelLayers.byUser.${handle}.models.${id} or {
+            presets = { };
+            characters = { };
+          };
+        in
+        check "byUser.${handle}.models.${id}" entry.contextSize (model.presets.openai or { })
+        ++ lib.concatLists (
+          lib.mapAttrsToList (
+            character: cfgEntry:
+            check "byUser.${handle}.models.${id}.characters.${character}" entry.contextSize (
+              cfgEntry.presets.openai or { }
+            )
+          ) (model.characters or { })
+        )
+      ) (builtins.attrNames (cfg.modelLayers.byUser.${handle}.models or { }))
+    ) modelLayerUsers;
+
+  # A generated preset must not land on a path the operator also declared by
+  # hand. `st.deepMerge` would let the generated file win silently; this turns
+  # that into an evaluation error instead.
+  modelLayerFileCollisions =
+    let
+      basePaths =
+        handle:
+        builtins.attrNames (
+          st.deepMerge
+            (
+              st.deepMerge
+                (st.mkPresetFiles cfg.presets.common)
+                (st.mkPresetFiles (cfg.presets.byUser.${handle} or { }))
+            )
+            (st.deepMerge cfg.files.common (cfg.files.byUser.${handle} or { }))
+        );
+      generatedPaths =
+        handle:
+        builtins.attrNames (
+          st.mkPresetFiles (
+            st.modelLayers.resolveForHandle {
+              catalog = cfg.modelLayers.catalog;
+              user = cfg.modelLayers.byUser.${handle} or { };
+            }
+          ).presets
+        )
+        ++ [ "user/files/st-model-layers.json" ];
+    in
+    lib.concatMap (
+      handle:
+      let
+        base = basePaths handle;
+      in
+      map (path: "${handle}:${path}") (
+        builtins.filter (path: builtins.elem path base) (generatedPaths handle)
+      )
+    ) seedHandles;
 
   # Every `files` entry, as { handle, path, entry } triples, so an assertion can
   # name the exact declaration that is wrong rather than failing with an opaque
@@ -1488,6 +1630,136 @@ in
 
         systemd cannot represent a newline in a single Environment= value. Use a
         list of strings, or put the variable in a file and reference it.
+      '';
+    }
+    # ── Model layers ─────────────────────────────────────────────────────────
+    {
+      # Declaring a catalogue with the feature off would generate nothing and
+      # report nothing. That is the exact failure mode this module refuses
+      # everywhere else, so it is refused here too.
+      assertion = cfg.modelLayers.enable || cfg.modelLayers.catalog == { };
+      message = ''
+        services.sillytavern-nixos: modelLayers: `modelLayers.catalog` is set but
+        `modelLayers.enable` is false.
+
+        The catalogue would generate no presets and no manifest, silently.
+        Set `modelLayers.enable = true`, or remove the catalogue.
+      '';
+    }
+    {
+      assertion = !cfg.modelLayers.enable || cfg.modelLayers.catalog != { };
+      message = ''
+        services.sillytavern-nixos: modelLayers: `modelLayers.enable` is true but the
+        catalogue is empty.
+
+        Nothing would be generated. Declare at least one model under
+        `modelLayers.catalog.<id>`, with a `connection.url` and a
+        `connection.model`.
+      '';
+    }
+    {
+      assertion = modelLayerUnknownIds == [ ];
+      message = ''
+        services.sillytavern-nixos: modelLayers: a `modelLayers.byUser` layer names a model
+        that is not in the catalogue.
+
+        Unknown: ${lib.concatStringsSep ", " modelLayerUnknownIds}
+
+        Catalogue: ${lib.concatStringsSep ", " modelLayerCatalogIds}
+
+        An unknown id would generate nothing, because every artifact is derived
+        from the catalogue entry (context size, preset name, connection). Add
+        the model to `modelLayers.catalog` or fix the spelling.
+      '';
+    }
+    {
+      assertion = modelLayerUnsafePresetNames == [ ];
+      message = ''
+        services.sillytavern-nixos: modelLayers: a model's preset name cannot be used as a
+        file name.
+
+        Offending models: ${lib.concatStringsSep ", " modelLayerUnsafePresetNames}
+
+        A preset name becomes `<presetName>.json` inside the account directory.
+        It cannot contain `/`, `\`, a control character, or begin/end with a
+        space or dot. Set `modelLayers.catalog.<id>.presetName` explicitly.
+      '';
+    }
+    {
+      assertion = modelLayerPresetNameCollisions == [ ];
+      message = ''
+        services.sillytavern-nixos: modelLayers: two models resolve to the same preset name.
+
+        Colliding names: ${lib.concatStringsSep ", " modelLayerPresetNameCollisions}
+
+        The generated files would overwrite each other, and the manifest would
+        point both models at one preset. Give one of them an explicit
+        `modelLayers.catalog.<id>.presetName`.
+      '';
+    }
+    {
+      assertion = modelLayerUnsafeCharacters == [ ];
+      message = ''
+        services.sillytavern-nixos: modelLayers: a character name cannot be used in a preset
+        file name.
+
+        Offending declarations:
+        ${lib.concatStringsSep "\n" (
+          map (
+            entry: "  byUser.${entry.handle}.models.${entry.id}.characters.${builtins.toJSON entry.character}"
+          ) modelLayerUnsafeCharacters
+        )}
+
+        A character gets `<presetName> ~ <character>.json`. The character part
+        cannot contain `/`, `\`, a control character, or begin/end with a space
+        or dot.
+      '';
+    }
+    {
+      assertion = modelLayerContextConflicts == [ ];
+      message = ''
+        services.sillytavern-nixos: modelLayers: a model layer sets `openai_max_context`
+        directly, and it disagrees with `contextSize`.
+
+        Conflicting declarations:
+        ${lib.concatStringsSep "\n" (map (where: "  ${where}") modelLayerContextConflicts)}
+
+        `openai_max_context` is GENERATED from
+        `modelLayers.catalog.<id>.contextSize` in every preset, including
+        character variants. Remove the hand-written value; change `contextSize`
+        instead, so the SillyTavern preset and the backend's `ctx-size` can be
+        kept in step.
+      '';
+    }
+    {
+      assertion = modelLayerFileCollisions == [ ];
+      message = ''
+        services.sillytavern-nixos: modelLayers: a generated model-layer file collides with
+        a file declared by hand.
+
+        Collisions:
+        ${lib.concatStringsSep "\n" (map (path: "  ${path}") modelLayerFileCollisions)}
+
+        `presets.*` and `files.*` are the raw layers; a model layer must not
+        overwrite one of their paths. Rename the generated preset (set
+        `modelLayers.catalog.<id>.presetName`) or the hand-written one.
+      '';
+    }
+    {
+      assertion = lib.all (
+        id:
+        let
+          connection = cfg.modelLayers.catalog.${id}.connection;
+        in
+        connection.url != "" && connection.model != ""
+      ) modelLayerCatalogIds;
+      message = ''
+        services.sillytavern-nixos: modelLayers: a catalogue entry has an empty
+        `connection.url` or `connection.model`.
+
+        `url` is the OpenAI-compatible base URL, including `/v1`. `model` is the
+        exact id the backend routes on. An empty value produces a profile that
+        looks configured and fails at request time.
       '';
     }
   ];

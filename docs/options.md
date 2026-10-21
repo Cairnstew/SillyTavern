@@ -16,6 +16,8 @@ For the per-account JSON surface — `settings.json`, presets, themes, world boo
 - [Environment variables](#environment-variables)
 - [Files, per account](#files-per-account)
 - [Named profiles: `presets.*`](#named-profiles-presets)
+- [Served models: the llama.cpp backend](#served-models-the-llamacpp-backend)
+- [Model layers: settings that follow a model](#model-layers-settings-that-follow-a-model)
 - [Not Nix-configurable](#not-nix-configurable)
 
 ---
@@ -414,6 +416,124 @@ removed upstream stops being accepted. `nix flake check` proves it both ways
 **Precedence** is unchanged: `settingsExtra` is the base layer,
 `settings.common` overrides it, and `settings.byUser` overrides both. So the
 same leaf can be set in more than one place, and the more specific one wins.
+
+## Served models: the llama.cpp backend
+
+SillyTavern's ONNX models — the weights it runs **itself** — are a different
+thing. The LLM is not one of those: it belongs to an inference server. This
+flake ships one as a *separate* NixOS module, because it has its own lifetime
+and resource profile:
+
+```nix
+imports = [ inputs.sillytavern.nixosModules.llama-cpp ];
+
+services.llama-cpp-nixos = {
+  enable = true;
+  package = pkgs.llama-cpp-cuda;      # or -rocm / -vulkan / plain
+  host = "127.0.0.1";
+  port = 9931;
+  models."gemma-4-e4b" = {
+    weights.path = "/var/lib/llama/gemma-4-e4b-Q4_0.gguf";
+    ctxSize = 16384;
+    primary = true;                    # the one loaded at startup
+    args = { ngl = "all"; np = 2; "chat-template" = "gemma"; };
+  };
+};
+```
+
+The option namespace is `services.llama-cpp-nixos`, not `services.llama-cpp`:
+nixpkgs already ships a `services.llama-cpp` module, exactly like it ships
+`services.sillytavern`. Two modules cannot own the same option or unit name.
+
+**Router mode.** The module always runs `llama serve` without a `-m`: one HTTP
+port serves every declared model, loading and unloading them on demand
+(`router.maxModels`, `router.autoload`). The module renders the catalogue to the
+INI format `--models-preset` reads. A section name IS the model id:
+
+```ini
+[gemma-4-e4b]
+model = /var/lib/llama/gemma-4-e4b-Q4_0.gguf
+c = 16384
+load-on-startup = true
+```
+
+so the string SillyTavern sends as `"model"` is the section name.
+
+**Weights** are operator-managed by default: `weights.path` is an absolute path
+the module never creates. For a pinned, store-backed copy, use
+`weights.url` + `weights.hash`; the module fetches it with `pkgs.fetchurl`.
+There are no runtime HuggingFace downloads in this version.
+
+**The model id must match in both modules.** This module and the SillyTavern
+module deliberately do not read each other's options. If you declare
+`models."gemma-4-e4b"` here, then
+`modelLayers.catalog."gemma-4-e4b".connection.model` must be `"gemma-4-e4b"`.
+Use one `let` binding in your host configuration:
+
+```nix
+let gemmaCtx = 16384; in {
+  services.llama-cpp-nixos.models."gemma-4-e4b".ctxSize = gemmaCtx;
+  services.sillytavern-nixos.modelLayers.catalog."gemma-4-e4b".contextSize = gemmaCtx;
+}
+```
+
+## Model layers: settings that follow a model
+
+An account has ONE `settings.json` and ONE `oai_settings` object, and the
+browser rewrites that file constantly. There is no server-side "active model"
+and nowhere to put a second settings object. `modelLayers` therefore does not
+try to make `settings.json` multi-model; it generates the artifacts upstream
+already switches by name:
+
+| Layer | Generated artifact |
+|---|---|
+| catalog (per model) | `OpenAI Settings/<presetName>.json` with sampling, `extensions`, and `openai_max_context`; optional Text Completion / Instruct / Context / Sysprompt / Reasoning presets |
+| `byUser.<handle>` | the same files, with that account's leaves merged in |
+| `byUser.<handle>.models.<id>.characters.<name>` | `OpenAI Settings/<presetName> ~ <name>.json`, carrying the model preset plus the character's overrides |
+| every handle | `user/files/st-model-layers.json`, the manifest |
+
+```nix
+services.sillytavern-nixos.modelLayers = {
+  enable = true;
+  catalog."gemma-4-e4b" = {
+    contextSize = 16384;
+    connection = {
+      api = "custom";
+      url = "http://127.0.0.1:9931/v1";
+      model = "gemma-4-e4b";
+    };
+    presets.openai = { temp_openai = 0.7; bind_preset_to_connection = true; };
+  };
+  byUser.seanc.models."gemma-4-e4b" = {
+    presets.openai.temp_openai = 0.9;
+    characters."Aria".presets.openai.temp_openai = 0.4;
+  };
+};
+```
+
+The merge order is exactly the hierarchy:
+
+```
+catalog.<id>.presets
+  → byUser.<handle>.models.<id>.presets
+    → …characters.<name>.presets
+```
+
+`openai_max_context` is **generated** from `contextSize` in every preset,
+including character variants. A hand-written value that disagrees is an
+evaluation error rather than a silent overwrite.
+
+The generated presets use `policy = "missing"`: a preset you tune in the UI
+survives `nixos-rebuild`. The manifest is the exception — it is derived state,
+so it uses `overwrite`.
+
+**What this version does not do.** There is no runtime resolver yet. The
+presets appear in the UI's dropdowns and are selected like any other preset; a
+client extension that switches profile and preset on model/character change is
+the next phase. When it lands it must **append** a Connection Profile with the
+manifest's stable id if it is missing, and never seed or rewrite
+`extension_settings.connectionManager.profiles`: that is a JSON *array* the
+user owns, and this project's deep-merge replaces arrays wholesale.
 
 ## What this module writes at the data root
 

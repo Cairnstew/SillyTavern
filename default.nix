@@ -79,6 +79,11 @@ in
   nixosModules = {
     default = sillytavernModule;
     sillytavern = sillytavernModule;
+    # The llama.cpp backend, for non-flake consumers. Opt-in, like the flake
+    # output: import it only where an inference server belongs.
+    llama-cpp = {
+      imports = [ ./modules/llama.nix ];
+    };
   };
 
   # The Home Manager half, for the same reason the flake exposes it: the SillyTavern

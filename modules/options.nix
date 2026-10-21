@@ -141,6 +141,45 @@ let
   # and would be unusable for the ones nobody enumerated.
   jsonObject = types.attrsOf types.anything;
 
+  # The partial preset tree a model layer can carry. Each bucket mirrors the
+  # corresponding `presets.*` bucket, but a layer is a DELTA: it is deep-merged
+  # over the layer above it, so a model layer can set one sampling value
+  # without restating the other hundred.
+  modelLayerPresets = types.submodule {
+    options = {
+      openai = mkOption {
+        type = jsonObject;
+        default = { };
+        description = "Chat Completion preset fields (sampling, `extensions`, …).";
+      };
+      textGeneration = mkOption {
+        type = jsonObject;
+        default = { };
+        description = "Text Completion preset fields.";
+      };
+      instruct = mkOption {
+        type = jsonObject;
+        default = { };
+        description = "Instruct template fields.";
+      };
+      context = mkOption {
+        type = jsonObject;
+        default = { };
+        description = "Context template fields.";
+      };
+      sysprompt = mkOption {
+        type = jsonObject;
+        default = { };
+        description = "System prompt fields.";
+      };
+      reasoning = mkOption {
+        type = jsonObject;
+        default = { };
+        description = "Reasoning template fields.";
+      };
+    };
+  };
+
   # The payload of a seeded file, TAGGED, so a Nix store path and a JSON string
   # can never be silently confused for each other. Exactly one of the two must be
   # set; `modules/assertions.nix` enforces that.
@@ -2494,6 +2533,194 @@ equivalents.
 
           Merged over `presets.common`, so a per-account item wins over a
           common one with the same bucket and name.
+        '';
+      };
+    };
+
+    # ── Model layers: settings that follow the active model ───────────────────
+    #
+    # A SillyTavern account has ONE `settings.json` and ONE `oai_settings`
+    # object, and the browser rewrites that file on nearly every UI
+    # interaction. There is no server-side "active model" and no place to put
+    # a second settings object. So this option does not try to make
+    # `settings.json` itself multi-model; it GENERATES the things upstream
+    # already switches by name:
+    #
+    #   * one Chat Completion preset per model (`OpenAI Settings/<name>.json`),
+    #     carrying sampling parameters and the preset's `extensions` map;
+    #   * the matching Text Completion / Instruct / Context / Sysprompt /
+    #     Reasoning presets, when a layer declares them;
+    #   * one `(model, character)` Chat Completion preset per declared
+    #     character, so a character can override a model's preset;
+    #   * `user/files/st-model-layers.json`, a manifest a client extension can
+    #     read to pick the right Connection Profile and preset when the active
+    #     model or chat changes.
+    #
+    # The hierarchy is resolved at EVAL time by `lib/model-layers.nix`:
+    #
+    #   catalog.<id> → byUser.<handle>.models.<id> → …characters.<name>
+    #
+    # `openai_max_context` is generated from `contextSize`, not written by
+    # hand, so it cannot drift from the value the backend is told to use. The
+    # runtime resolver is NOT part of this option group yet: until it exists,
+    # the generated presets appear in the UI's dropdowns and are selected the
+    # same way any other preset is.
+    modelLayers = {
+      enable = mkEnableOption ''
+        per-model and per-character preset generation
+      '';
+
+      catalog = mkOption {
+        type = types.attrsOf (
+          types.submodule {
+            options = {
+              presetName = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                example = "gemma-4-e4b";
+                description = ''
+                  The name of the generated presets, and the name of the
+                  Connection Profile in the manifest. Defaults to the model id
+                  with `/` replaced by `-`.
+
+                  It becomes a FILE NAME, so it cannot contain `/`, `\` or a
+                  control character.
+                '';
+              };
+
+              contextSize = mkOption {
+                type = types.ints.positive;
+                default = 4096;
+                example = 16384;
+                description = ''
+                  The model's context window, in tokens. This is the single
+                  source of `openai_max_context` in every generated Chat
+                  Completion preset for this model, including character
+                  variants.
+
+                  When the model is also served by
+                  `services.llama-cpp-nixos.models.<id>.ctxSize`, set both from the
+                  same value. The two modules do not read each other, so the
+                  matching is a documented contract rather than a cross-module
+                  read; `lib/tests.nix` pins the rendered pairing.
+                '';
+              };
+
+              connection = {
+                api = mkOption {
+                  type = types.enum [ "custom" ];
+                  default = "custom";
+                  description = ''
+                    The SillyTavern chat-completion source. Only `custom` is
+                    supported in this version, which is what an
+                    OpenAI-compatible llama.cpp server is.
+                  '';
+                };
+                url = mkOption {
+                  type = types.str;
+                  example = "http://127.0.0.1:9931/v1";
+                  description = ''
+                    Base URL of the OpenAI-compatible endpoint, INCLUDING
+                    `/v1`. SillyTavern appends the endpoint path to this.
+                  '';
+                };
+                model = mkOption {
+                  type = types.str;
+                  example = "gemma-4-e4b";
+                  description = ''
+                    The model id SillyTavern sends in the request's `"model"`
+                    field. For `services.llama-cpp-nixos` this MUST equal the key
+                    under `services.llama-cpp-nixos.models`, because that key is the
+                    router's INI section name and the router routes on it.
+                  '';
+                };
+                secretId = mkOption {
+                  type = types.nullOr types.str;
+                  default = null;
+                  example = "llama";
+                  description = ''
+                    The label of a `secrets.byUser.<handle>.<label>` entry to
+                    use as this connection's API key. `null` means keyless.
+                  '';
+                };
+              };
+
+              presets = mkOption {
+                type = modelLayerPresets;
+                default = { };
+                description = ''
+                  Host-wide preset deltas for this model. Every account gets
+                  these unless its own layer overrides a leaf.
+                '';
+              };
+            };
+          }
+        );
+        default = { };
+        description = ''
+          The model catalogue: one entry per model whose settings should be
+          generated. The attribute NAME is the model id, and it must match
+          `services.llama-cpp-nixos.models.<id>` when both modules are used.
+        '';
+      };
+
+      byUser = mkOption {
+        type = types.attrsOf (
+          types.submodule {
+            options.models = mkOption {
+              type = types.attrsOf (
+                types.submodule {
+                  options = {
+                    presets = mkOption {
+                      type = modelLayerPresets;
+                      default = { };
+                      description = ''
+                        This account's overrides for the model's presets,
+                        deep-merged over `catalog.<id>.presets`. A leaf here
+                        wins; siblings declared above survive.
+                      '';
+                    };
+                    characters = mkOption {
+                      type = types.attrsOf (
+                        types.submodule {
+                          options.presets = mkOption {
+                            type = modelLayerPresets;
+                            default = { };
+                            description = ''
+                              This character's overrides, deep-merged over the
+                              account's model layer. A character always gets a
+                              Chat Completion preset (so selecting it carries
+                              the model's settings); the other buckets are
+                              generated only when they are declared here.
+                            '';
+                          };
+                        }
+                      );
+                      default = { };
+                      description = ''
+                        Per-character layers, keyed by the character's DISPLAY
+                        name — the same string upstream's `autoSelectPreset`
+                        compares against a preset name
+                        (`public/scripts/preset-manager.js:47-76`).
+                      '';
+                    };
+                  };
+                }
+              );
+              default = { };
+              description = ''
+                Models this account has a layer for, keyed by the model id.
+                Every id must exist in `modelLayers.catalog`; an unknown id is
+                an evaluation error, not a silently ignored directory.
+              '';
+            };
+          }
+        );
+        default = { };
+        description = ''
+          Per-account model layers, keyed by account HANDLE. The handle must be
+          a declared account (or `default-user`), for the same reason
+          `settings.byUser` does.
         '';
       };
     };

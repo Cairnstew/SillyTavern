@@ -727,6 +727,14 @@ in
     leafEntries
     ;
 
+  # ── The two renderers for the llama.cpp integration ─────────────────────────
+  #
+  # `llama` is pure (an INI renderer), and `modelLayers` resolves the
+  # per-user/per-model/per-character preset tree. Neither reads module config,
+  # so both are directly testable and neither creates an import cycle.
+  llama = import ./llama.nix { inherit lib; };
+  modelLayers = import ./model-layers.nix { inherit lib deepMerge; };
+
   # ── mkUserArg ───────────────────────────────────────────────────────────────
   #
   # Resolves one `services.sillytavern-nixos.users.<handle>` spec into the flat shape

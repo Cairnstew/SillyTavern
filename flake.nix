@@ -51,12 +51,20 @@
       forAllSystems = lib.genAttrs systems;
       pkgsFor = system: import nixpkgs {
         inherit system;
-        # The package itself is pure MIT-ish/AGPL JS with no unfree
-        # dependencies. Enabling `allowUnfree` here would be convenient and
-        # wrong: it would silently change the licence posture of every consumer
-        # who imports this flake. A consumer who needs unfree adds it to their
-        # own nixpkgs.
-        config = { };
+        # `allowUnfree` is enabled for the FLAKE'S OWN package set only.
+        #
+        # The SillyTavern package itself is pure MIT-ish/AGPL JS with no unfree
+        # dependencies, so this does not change it. It is here for
+        # `pkgs.llama-cpp-cuda`, whose CUDA runtime is unfree, so the backend
+        # module and its checks can evaluate the variant this project targets.
+        #
+        # It does NOT change a consumer's licence posture: a consumer who
+        # imports `nixosModules.*` keeps their own `nixpkgs.config`. Only the
+        # outputs built from this `pkgsFor` — this flake's packages, checks and
+        # devShells — see it.
+        config = {
+          allowUnfree = true;
+        };
       };
 
       # The application source: THIS flake's own tree.
@@ -106,6 +114,10 @@
       # level is a plain attrset.
       nixosModules = {
         sillytavern = ./modules/sillytavern.nix;
+        # The inference backend. Separate on purpose: it has its own lifetime
+        # and resource profile, and neither service should force the other on.
+        # See modules/llama.nix.
+        llama-cpp = ./modules/llama.nix;
         default = self.nixosModules.sillytavern;
       };
 

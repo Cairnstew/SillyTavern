@@ -111,6 +111,15 @@ account. They are the ones worth typed options:
 | World Info policy | all 13 of `world_info_settings` (`world_info_depth`, `world_info_budget`, `world_info_recursive`, `world_info_case_sensitive`, …) | a lorebook *policy*, not a lorebook |
 | Preset *selection* | `power_user.instruct.preset`, `.context.preset`, `.sysprompt.*`, `.reasoning.*` | the preset content is a file (`files.byUser`); which one is active is a setting |
 
+There is one selection hook that is not a settings key: on every chat change,
+`autoSelectPreset()` picks the preset whose NAME equals the character or group
+name (`public/scripts/preset-manager.js:47-76`). That is the only native
+per-character switch. It is why `modelLayers` generates a
+`<model> ~ <character>` preset rather than trying to write a per-character
+`settings.json`, and it is the mechanism a runtime resolver has to coexist
+with. The rest of the per-character layer (arbitrary `power_user` leaves) has
+no native hook and is not implemented.
+
 ### 3.2 Leave alone — session state the UI owns
 
 Declaring these in Nix means fighting the user on every activation. They are

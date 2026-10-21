@@ -852,3 +852,50 @@ one failure mode a user cannot diagnose from a log. `scripts/eval-assertions.nix
 is the right shape for the check — evaluate the configuration and report the
 assertion failures — but nothing in the suite passes a self-referential
 `proxyUpstreams` through it.
+
+## 2026-10-21 — model layers: two gaps found while planning
+
+### `settings-surface.md` §3.1 omits the only per-character hook
+
+`docs/settings-surface.md:112` lists "Preset selection" as settings keys
+(`power_user.instruct.preset`, `.context.preset`, …). It does not mention the
+one mechanism that selects a preset per CHAT: on every chat change,
+`autoSelectPreset()` picks the preset whose NAME equals the character or group
+name — `public/scripts/preset-manager.js:47-76`. That is the only native
+per-character switch in the client.
+
+**Rule:** a per-character layer has exactly one native lever, and it is preset
+NAME matching, not a `settings.json` key. A design that ignores it will build a
+resolver the UI never invokes, and will fight the one it does.
+
+### nixpkgs already owns `services.llama-cpp`
+
+`nixos/modules/services/misc/llama-cpp.nix` declares `services.llama-cpp`
+(`enable`, `package`, a freeform `settings` that accepts `models-preset`, and a
+`llama-cpp` unit). A module cannot use that namespace: evaluation fails with
+
+```
+error: The option `services.llama-cpp.enable' … is already declared
+```
+
+This is the same collision as `services.sillytavern`, and the same answer:
+namespace ours `services.llama-cpp-nixos`, with a `llama-cpp-nixos` unit.
+Discovered by `nix eval .#checks.x86_64-linux.llamaPresetRendered.drvPath`,
+not by guessing.
+
+### Nix trap, eighth: escaping `[`/`]` in a `builtins.match` class
+
+`builtins.match "[^\[\]]+" "model/a"` returns `null`. Nix's POSIX regex reads
+`\[` as a literal backslash followed by a class terminator, not an escaped
+bracket. Put `]` immediately after `^` instead: `[^][#;\n\r\t]+`
+(`lib/llama.nix:55`). Verified both ways:
+`builtins.match … "model/a"` was `null` for the escaped form and a match for
+the first-position form.
+
+### Generated `files` entries must carry `mode`
+
+`normaliseFiles` reads `entry.mode` without an `or null`
+(`modules/config.nix:770`), so a programmatically generated entry that omits it
+dies with `attribute 'mode' missing`. The model-layer generator emits
+`mode = null` beside `policy` for exactly this reason; anything else that
+builds a `files` entry outside a submodule must do the same.
