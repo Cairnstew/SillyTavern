@@ -702,6 +702,45 @@ let
       );
     };
 
+  # ── The speech backend, when one is enabled ────────────────────────────────
+  #
+  # A deliberately OPTIONAL read of another module's options. `or null` keeps
+  # this module usable on its own: when the Breeze module is not imported the
+  # attribute does not exist and the whole block below is inert. When it IS
+  # imported and enabled, the TTS extension is pointed at it without the
+  # consumer writing the same endpoint twice.
+  #
+  # This is the one cross-module read in the tree, and it is one-way: the
+  # SillyTavern module never sets a Breeze option, and the Breeze module never
+  # reads this one. `ttsEndpoint` is what the read is for.
+  breezeTts = config.services.breeze-tts-nixos or null;
+
+  ttsEndpoint =
+    if cfg.tts.endpoint != null then
+      cfg.tts.endpoint
+    else if breezeTts != null && (breezeTts.enable or false) then
+      "http://127.0.0.1:${toString (breezeTts.port or 8137)}/v1/audio/speech"
+    else
+      null;
+
+  # `{}` unless there is an endpoint to point at, so the merge below is a no-op
+  # for every configuration that does not enable a speech backend.
+  ttsExtensionSettings = lib.optionalAttrs (cfg.tts.autoConfigure && ttsEndpoint != null) {
+    tts = {
+      currentProvider = cfg.tts.provider;
+      enabled = cfg.tts.enable;
+      ${cfg.tts.provider} = {
+        provider_endpoint = ttsEndpoint;
+        model = cfg.tts.model;
+        available_voices = cfg.tts.voices;
+        voiceMap = { };
+        speed = 1;
+      };
+    } // lib.optionalAttrs (cfg.tts.autoGeneration != null) {
+      auto_generation = cfg.tts.autoGeneration;
+    };
+  };
+
   # ── Render settingsExtra into settings.json keys ─────────────────────────
   #
   # The new first-class options under `settingsExtra` map to top-level keys
@@ -727,7 +766,10 @@ let
     selected_proxy = cfg.settingsExtra.selectedProxy;
     swipes = cfg.settingsExtra.swipes;
     username = cfg.settingsExtra.username;
-    extension_settings = cfg.settingsExtra.extensionSettings;
+    # The generated speech settings are the BASE: an explicit
+    # `settingsExtra.extensionSettings.tts` (or `settings.common`, or a
+    # per-account value) overrides them leaf by leaf.
+    extension_settings = st.deepMerge ttsExtensionSettings cfg.settingsExtra.extensionSettings;
 
     # The seven typed UI subtrees.
     #
@@ -810,6 +852,15 @@ in
   };
 
   config = {
+    # `tts.enable` without anything to point at would look applied and do
+    # nothing: the TTS extension would stay on whatever provider it had.
+    warnings = lib.optional (cfg.tts.enable && ttsEndpoint == null) ''
+      services.sillytavern-nixos.tts.enable is set, but there is no endpoint to
+      point at: no Breeze TTS backend is enabled in this system and
+      `tts.endpoint` is null. Set `services.sillytavern-nixos.tts.endpoint`, or
+      enable `services.breeze-tts-nixos` in the same host configuration.
+    '';
+
     services.sillytavern-nixos = {
       # Derived from `stateDirectory`, which systemd turns into
       # /var/lib/<stateDirectory>. Declared `internal` over `readOnly` — see the
@@ -842,6 +893,11 @@ services.sillytavern-nixos.internal = {
   healthcheckEnv = healthcheckEnv;
   seedSpec = seedSpec;
   seedSpecJson = seedSpecJson;
+
+  # The resolved speech endpoint (null when no backend is enabled and none was
+  # named) and the generated extension_settings fragment. Read by the tests.
+  ttsEndpoint = ttsEndpoint;
+  ttsExtensionSettings = ttsExtensionSettings;
 
   # The model cache directory the server will use, or null for upstream's own
   # `<dataRoot>/_cache`. Read by modules/services.nix, which points the cache

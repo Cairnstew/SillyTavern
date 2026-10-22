@@ -18,6 +18,7 @@ For the per-account JSON surface — `settings.json`, presets, themes, world boo
 - [Named profiles: `presets.*`](#named-profiles-presets)
 - [Locally-run models: `models.*`](#locally-run-models-models)
 - [Served models: the llama.cpp backend](#served-models-the-llamacpp-backend)
+- [Served speech: the Breeze TTS backend](#served-speech-the-breeze-tts-backend)
 - [Model layers: settings that follow a model](#model-layers-settings-that-follow-a-model)
 - [What this module writes at the data root](#what-this-module-writes-at-the-data-root)
 - [Not Nix-configurable](#not-nix-configurable)
@@ -603,6 +604,41 @@ let gemmaCtx = 16384; in {
   services.sillytavern-nixos.modelLayers.catalog."gemma-4-e4b".contextSize = gemmaCtx;
 }
 ```
+
+## Served speech: the Breeze TTS backend
+
+Speech is the second inference backend, and it is a separate module for the same
+reason llama.cpp is: it has its own lifetime, its own resource profile and its own
+GPU footprint.
+
+```nix
+imports = [ inputs.sillytavern.nixosModules.breeze-tts ];
+
+services.breeze-tts-nixos = {
+  enable = true;
+  model = "q4_k";                # catalogue entry; see lib/tts-models.nix
+  gpu.totalVramMiB = 12288;      # static budget check
+  gpu.reserveForOtherMiB = 7000; # room the LLM is allowed to hold
+};
+```
+
+It serves an OpenAI-compatible `/v1/audio/speech`, which SillyTavern uses through
+its **OpenAI Compatible** TTS provider. Enabling the backend also **points that
+provider at it automatically** — the SillyTavern module notices an enabled
+`services.breeze-tts-nixos` and writes `extension_settings.tts` into every
+account's `settings.json` (opt out with
+`services.sillytavern-nixos.tts.autoConfigure = false`, override with
+`services.sillytavern-nixos.tts.*`). The option namespace is
+`services.breeze-tts-nixos`, and the full story — measured viability on a 12 GiB
+card, the quantisation ladder, both overload guards and the wiring options — is
+**[`tts.md`](tts.md)**.
+
+Two things to know before reaching for it:
+
+- the **weights are non-commercial**; the source is Apache-2.0, the model is not;
+- the **VRAM guard is the point** of the module. Vulkan and systemd both lack a
+  per-process device-memory limit, so the module checks a static budget at
+  evaluation time and the driver's real free VRAM at start.
 
 ## Model layers: settings that follow a model
 

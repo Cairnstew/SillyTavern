@@ -56,6 +56,7 @@ that will otherwise block you.
 | **TLS** | `ssl.certFile` / `ssl.keyFile`, copied in at build time |
 | **The models it runs itself** | `models.byId` (in the store) / `models.directory` (where you put them) — the ONNX weights behind the extensions, never downloaded at runtime |
 | **A local inference server** | `settingsExtra.oaiSettings` / `.textGenerationSettings` — point SillyTavern at llama.cpp, Ollama, vLLM or KoboldCpp |
+| **A local speech server** | `services.breeze-tts-nixos` — Breeze-TTS-2.cpp, OpenAI-compatible `/v1/audio/speech`, with static + runtime VRAM guards; SillyTavern's TTS extension is pointed at it automatically |
 | **The unit** | `systemdOverrides`, `hardware` caps, `restartTriggers` |
 | **A reverse proxy** | `proxyUpstreams` carries the four settings that proxy setups get wrong |
 
@@ -66,6 +67,8 @@ that will otherwise block you.
 - **[docs/installing.md](docs/installing.md)** — the decisions that block you:
   authentication and TLS; where the data lives; reverse proxying
 - **[docs/options.md](docs/options.md)** — the option surface
+- **[docs/tts.md](docs/tts.md)** — the local speech backend: measured viability,
+  the VRAM/RAM guards, and the SillyTavern wiring
 - **[docs/users.md](docs/users.md)** — accounts, permissions, scripting a login
 - **[docs/settings-surface.md](docs/settings-surface.md)** — the UI's own
   settings, and the 439 typed options that cover them
@@ -82,6 +85,7 @@ npm ci                       # the app's dependencies
 nix flake check              # the whole suite
 python3 -m pytest nix-tests/ # the seeder's tests
 ./nix-tests/home-eval.sh     # the Home Manager module (needs network)
+just tts-test                # the speech backend's checks (no GPU needed)
 nix run .                    # a server straight from the store
 ```
 

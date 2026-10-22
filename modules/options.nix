@@ -3360,6 +3360,90 @@ equivalents.
       };
     };
 
+    # ── Local speech: the TTS extension ───────────────────────────────────────
+    #
+    # The browser-side TTS extension keeps its state at
+    # `extension_settings.tts`, and its **OpenAI Compatible** provider does NOT
+    # call the endpoint from the browser: it POSTs to SillyTavern's own
+    # `/api/openai/custom/generate-voice`, which proxies server-side
+    # (`src/endpoints/openai.js`). That is why the endpoint can be a loopback
+    # address even when the browser is remote, and why CORS is irrelevant here.
+    #
+    # When `services.breeze-tts-nixos` is enabled in the same system, the
+    # provider is pointed at it automatically. The read is guarded with `or`, so
+    # importing this module alone behaves exactly as before, and an explicit
+    # `settingsExtra.extensionSettings.tts` always wins over the generated
+    # defaults.
+    tts = {
+      autoConfigure = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          When a Breeze TTS backend is enabled in the same system (or
+          `tts.endpoint` is set), write the OpenAI-Compatible provider settings
+          into every account's `extension_settings.tts`.
+
+          Set `false` to manage `extension_settings.tts` entirely yourself
+          through `settingsExtra`; nothing is written in that case.
+        '';
+      };
+
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          `extension_settings.tts.enabled` — speak assistant replies as they
+          arrive. Off by default: turning it on changes what the UI does on
+          load, and a wrongly-pointed endpoint should not start talking before
+          you have chosen a voice.
+        '';
+      };
+
+      endpoint = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "http://127.0.0.1:8137/v1/audio/speech";
+        description = ''
+          The full `/v1/audio/speech` URL. `null` derives it from the Breeze
+          backend's `port`; set it explicitly to point at a server on another
+          host, or when the Breeze module is not imported.
+        '';
+      };
+
+      provider = mkOption {
+        type = types.str;
+        default = "OpenAI Compatible";
+        description = "The TTS provider to select. Upstream's provider name is `OpenAI Compatible`.";
+      };
+
+      model = mkOption {
+        type = types.str;
+        default = "tts-1";
+        description = "The `model` field. SillyTavern requires one; the Breeze server ignores it.";
+      };
+
+      voices = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        example = [
+          "narrator"
+          "harbour"
+        ];
+        description = ''
+          `available_voices`: the voice ids the UI offers. Empty leaves the
+          dropdown empty, which still works for reference-free voice design
+          (the request sends no voice). Register voices on the server with
+          `POST /v1/voices` and list their ids here.
+        '';
+      };
+
+      autoGeneration = mkOption {
+        type = types.nullOr types.bool;
+        default = null;
+        description = "`extension_settings.tts.auto_generation`. null leaves upstream's default.";
+      };
+    };
+
     # ── Provider API keys ─────────────────────────────────────────────────────
     #
     # 1.19 moved every provider key OUT of `settings.json` and into a

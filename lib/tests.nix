@@ -180,6 +180,7 @@ rec {
 
   evalSystem = pkgs: module: evalWith pkgs [ module modulePath ];
   evalLlama = pkgs: module: evalWith pkgs [ module ../modules/llama.nix ];
+  evalTts = pkgs: module: evalWith pkgs [ module ../modules/breeze-tts.nix ];
 
   # ── 0. The module, the overlay and the flake agree on ONE package ───────────
   #
@@ -3182,6 +3183,323 @@ rec {
         touch "$out"
       '';
 
+  # ── Breeze TTS backend ─────────────────────────────────────────────────────
+  #
+  # The speech backend is a third independent module. These evaluate it alone
+  # (the cross-module independence the design promises), render its unit, and —
+  # the important one — RUN its VRAM guard against a stubbed driver, because a
+  # guard that is only asserted to exist is decoration.
+  breezeTtsCatalog =
+    pkgs:
+    let
+      catalog = import ../lib/tts-models.nix;
+      entries = lib.attrValues catalog;
+    in
+    assert lib.all (e: builtins.stringLength e.sha256 == 64) entries;
+    assert lib.all (e: e.vramMiB >= e.sizeMiB) entries;
+    assert lib.all (e: e.ramMiB >= e.sizeMiB) entries;
+    assert lib.all (e: lib.hasSuffix ".gguf" e.file) entries;
+    pkgs.runCommand "sillytavern-check-breeze-tts-catalog" { }
+      ''
+        echo "PASS breeze-tts-catalog (pins, file names, footprints agree)"
+        touch "$out"
+      '';
+
+  breezeTtsPackage =
+    pkgs:
+    let
+      vulkan = pkgs.callPackage ../pkgs/breeze-tts-2 { };
+      cpu = pkgs.callPackage ../pkgs/breeze-tts-2 { vulkanSupport = false; };
+    in
+    assert lib.isDerivation vulkan;
+    assert lib.isDerivation cpu;
+    assert vulkan.vulkanSupport;
+    assert !cpu.vulkanSupport;
+    assert vulkan.meta.mainProgram == "breeze-server";
+    pkgs.runCommand "sillytavern-check-breeze-tts-package" { }
+      ''
+        echo "PASS breeze-tts-package (both variants evaluate; passthru distinguishes them)"
+        touch "$out"
+      '';
+
+  breezeTtsUnit =
+    pkgs:
+    let
+      system = evalTts pkgs {
+        services.breeze-tts-nixos = {
+          enable = true;
+          model = "q4_k";
+          webui = true;
+          gpu.totalVramMiB = 12288;
+          gpu.reserveForOtherMiB = 7000;
+        };
+      };
+      cfg = system.config.services.breeze-tts-nixos;
+      unit = system.config.systemd.services.breeze-tts-nixos;
+    in
+    # The static budget and the runtime need are different numbers.
+    assert cfg.internal.requiredVramMiB == 3072;
+    assert cfg.internal.needVramMiB == 10840;
+    assert cfg.internal.runtimeNeedVramMiB == 3840;
+    # RAM cap derived from the catalogue: q4_k file + 2 GiB.
+    assert cfg.internal.memoryMax == "4608M";
+    assert unit.serviceConfig.MemoryMax == "4608M";
+    assert unit.serviceConfig.CPUQuota == "400%";
+    assert unit.serviceConfig.MemorySwapMax == "0";
+    assert unit.serviceConfig.User == "breeze-tts";
+    assert unit.serviceConfig.StateDirectory == [
+      "breeze-tts"
+      "breeze-tts/models"
+      "breeze-tts/voices"
+    ];
+    assert unit.unitConfig.StartLimitBurst == 3;
+    # The unit runs the renderer's argv, not a second hand-written copy.
+    assert lib.hasInfix "breeze-tts-2-q4_k.gguf" unit.serviceConfig.ExecStart;
+    assert lib.hasInfix "--host 127.0.0.1" unit.serviceConfig.ExecStart;
+    assert lib.hasInfix "--port 8137" unit.serviceConfig.ExecStart;
+    assert lib.hasInfix "--webui" unit.serviceConfig.ExecStart;
+    assert lib.hasInfix "--chunk-max 40" unit.serviceConfig.ExecStart;
+    assert lib.hasInfix "--split-chars 300" unit.serviceConfig.ExecStart;
+    assert lib.hasInfix "--voices-dir /var/lib/breeze-tts/voices" unit.serviceConfig.ExecStart;
+    # model check + VRAM guard, in that order.
+    assert builtins.length unit.serviceConfig.ExecStartPre == 2;
+    # The Vulkan ICDs are wired, and the unit orders itself after the LLM.
+    assert unit.environment.VK_ICD_FILENAMES
+      == "/run/opengl-driver/share/vulkan/icd.d:/run/opengl-driver-32/share/vulkan/icd.d";
+    assert builtins.elem "llama-cpp-nixos.service" unit.after;
+    pkgs.runCommand "sillytavern-check-breeze-tts-unit" { }
+      ''
+        echo "PASS breeze-tts-unit (argv, caps, state dir, guard wiring)"
+        touch "$out"
+      '';
+
+  breezeTtsAssertions =
+    pkgs:
+    let
+      failures =
+        ttsConfig:
+        builtins.filter (
+          a: !a.assertion && lib.hasInfix "services.breeze-tts-nixos:" (a.message or "")
+        ) (evalTts pkgs { services.breeze-tts-nixos = ttsConfig; }).config.assertions;
+      count = ttsConfig: builtins.length (failures ttsConfig);
+      base = {
+        enable = true;
+        model = "q4_k";
+      };
+    in
+    assert count base == 0;
+    # No weights source at all: the "exactly one source" assertion AND the
+    # custom-footprint assertion both fire.
+    assert count (base // { model = null; }) == 2;
+    # Two weights sources.
+    assert count (
+      base
+      // {
+        weights.path = "/var/lib/breeze-tts/models/custom.gguf";
+        gpu.requiredVramMiB = 3072;
+        hardware.memoryMax = "4G";
+      }
+    ) == 1;
+    # A custom GGUF without a stated footprint (one assertion covers both).
+    assert count (base // { model = null; weights.path = "/var/lib/breeze-tts/custom.gguf"; }) == 1;
+    # A URL without its hash: the pairing assertion AND the footprint one.
+    assert count (
+      base // { model = null; weights.url = "https://example.invalid/m.gguf"; }
+    ) == 2;
+    # The model plus the reserve cannot fit the declared card.
+    assert count (
+      base // { gpu.totalVramMiB = 9000; gpu.reserveForOtherMiB = 7000; }
+    ) == 1;
+    # Vulkan backend with a CPU-only package.
+    assert count (
+      base // { package = pkgs.callPackage ../pkgs/breeze-tts-2 { vulkanSupport = false; }; }
+    ) == 1;
+    # wsPort equals the HTTP port.
+    assert count (base // { wsPort = 8137; }) == 1;
+    # The chunk ramp cannot shrink.
+    assert count (base // { chunkFirst = 10; chunkMax = 4; }) == 1;
+    # extraArgs repeats a flag the module owns, in either spelling.
+    assert count (base // { extraArgs = [ "--cpu" ]; }) == 1;
+    assert count (base // { extraArgs = [ "--port=9999" ]; }) == 1;
+    # An absolute StateDirectory.
+    assert count (base // { stateDirectory = "/var/lib/breeze"; }) == 1;
+    pkgs.runCommand "sillytavern-check-breeze-tts-assertions" { }
+      ''
+        echo "PASS breeze-tts-assertions (weights, budget, backend, args)"
+        touch "$out"
+      '';
+
+  # This is the check that makes the guards real: the generated script is run,
+  # against a stubbed nvidia-smi, and must both pass a start that fits and
+  # refuse one that does not.
+  breezeTtsVramGuard =
+    pkgs:
+    let
+      guard =
+        (evalTts pkgs {
+          services.breeze-tts-nixos = {
+            enable = true;
+            model = "q4_k";
+            gpu.totalVramMiB = 12288;
+            gpu.reserveForOtherMiB = 7000;
+          };
+        }).config.services.breeze-tts-nixos.internal.vramGuardScript;
+      cpuGuard =
+        (evalTts pkgs {
+          services.breeze-tts-nixos = {
+            enable = true;
+            model = "q4_k";
+            backend = "cpu";
+          };
+        }).config.services.breeze-tts-nixos.internal.vramGuardScript;
+    in
+    pkgs.runCommand "sillytavern-check-breeze-tts-vram-guard" { } ''
+      mkdir -p fakebin
+      cat > fakebin/nvidia-smi <<'EOF'
+      #!${pkgs.bash}/bin/bash
+      printf '%s\n' "$FAKE_VRAM"
+      EOF
+      chmod +x fakebin/nvidia-smi
+      export PATH="$PWD/fakebin:$PATH"
+
+      # required 3072 + headroom 768 = 3840 MiB, and the LLM's reserve is NOT
+      # added: it is already reflected in the free figure below.
+      export FAKE_VRAM="12288, 5000"
+      ${guard} || { echo "guard refused a start that fits"; exit 1; }
+
+      export FAKE_VRAM="12288, 3000"
+      if ${guard}; then
+        echo "guard accepted a start that does not fit"
+        exit 1
+      fi
+
+      # CPU backend skips the probe entirely, even with no readable GPU.
+      PATH=/nonexistent ${cpuGuard} || { echo "cpu guard did not skip"; exit 1; }
+
+      echo "PASS breeze-tts-vram-guard (fits passes, over-budget refuses, cpu skips)"
+      touch "$out"
+    '';
+
+  # The documented SillyTavern half: the settings shape upstream's
+  # `openai-compatible.js` provider reads, rendered into the account's
+  # settings.json. This is the integration the two modules deliberately do not
+  # wire for each other, so it is worth pinning in a test rather than prose.
+  breezeTtsSillyTavernWiring =
+    pkgs:
+    let
+      system = evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          config.enableUserAccounts = true;
+          users.seanc.passwordFile = pkgs.writeText "pw" "not-a-real-password";
+          settingsExtra.extensionSettings.tts = {
+            currentProvider = "OpenAI Compatible";
+            enabled = true;
+            "OpenAI Compatible" = {
+              provider_endpoint = "http://127.0.0.1:8137/v1/audio/speech";
+              model = "tts-1";
+              available_voices = [ "narrator" ];
+            };
+          };
+        };
+      };
+      s = system.config.services.sillytavern-nixos.internal.seedSpecJson.users.seanc.settings;
+    in
+    assert s.extension_settings.tts.currentProvider == "OpenAI Compatible";
+    assert s.extension_settings.tts.enabled;
+    assert s.extension_settings.tts."OpenAI Compatible".provider_endpoint
+      == "http://127.0.0.1:8137/v1/audio/speech";
+    assert s.extension_settings.tts."OpenAI Compatible".available_voices == [ "narrator" ];
+    pkgs.runCommand "sillytavern-check-breeze-tts-sillytavern" { }
+      ''
+        echo "PASS breeze-tts-sillytavern (OpenAI Compatible provider settings land)"
+        touch "$out"
+      '';
+
+  # Auto-wiring: enabling the Breeze backend points SillyTavern's TTS extension
+  # at it, with no settings block to write by hand. The read is optional, so a
+  # system with only the SillyTavern module is unchanged, and an explicit
+  # extension_settings.tts always wins.
+  ttsAutoWiring =
+    pkgs:
+    let
+      stBase = {
+        services.sillytavern-nixos = {
+          enable = true;
+          config.enableUserAccounts = true;
+          users.seanc.passwordFile = pkgs.writeText "pw" "not-a-real-password";
+        };
+      };
+      breeze = {
+        services.breeze-tts-nixos = {
+          enable = true;
+          model = "q4_k";
+        };
+      };
+      withBreeze = evalWith pkgs [
+        ../modules/breeze-tts.nix
+        modulePath
+        stBase
+        breeze
+      ];
+      withoutBreeze = evalWith pkgs [
+        modulePath
+        stBase
+      ];
+      overridden = evalWith pkgs [
+        ../modules/breeze-tts.nix
+        modulePath
+        stBase
+        breeze
+        {
+          services.sillytavern-nixos.settingsExtra.extensionSettings.tts.currentProvider = "Custom";
+        }
+      ];
+      endpointOverride = evalWith pkgs [
+        modulePath
+        stBase
+        { services.sillytavern-nixos.tts.endpoint = "http://tts.lan:9000/v1/audio/speech"; }
+      ];
+      portOverride = evalWith pkgs [
+        ../modules/breeze-tts.nix
+        modulePath
+        stBase
+        {
+          services.breeze-tts-nixos = {
+            enable = true;
+            model = "q4_k";
+            port = 9999;
+          };
+        }
+      ];
+      disabled = evalWith pkgs [
+        ../modules/breeze-tts.nix
+        modulePath
+        stBase
+        breeze
+        { services.sillytavern-nixos.tts.autoConfigure = false; }
+      ];
+      ext = s: s.config.services.sillytavern-nixos.internal.seedSpecJson.users.seanc.settings.extension_settings;
+      tts = s: (ext s).tts or null;
+    in
+    assert (tts withBreeze).currentProvider == "OpenAI Compatible";
+    assert (tts withBreeze).enabled == false;
+    assert (tts withBreeze)."OpenAI Compatible".provider_endpoint
+      == "http://127.0.0.1:8137/v1/audio/speech";
+    assert (tts withBreeze)."OpenAI Compatible".model == "tts-1";
+    assert (tts withoutBreeze) == null;
+    assert (tts overridden).currentProvider == "Custom";
+    assert (tts endpointOverride)."OpenAI Compatible".provider_endpoint
+      == "http://tts.lan:9000/v1/audio/speech";
+    assert (tts portOverride)."OpenAI Compatible".provider_endpoint
+      == "http://127.0.0.1:9999/v1/audio/speech";
+    assert (tts disabled) == null;
+    pkgs.runCommand "sillytavern-check-tts-auto-wiring" { }
+      ''
+        echo "PASS tts-auto-wiring (breeze enables it, override wins, no backend is a no-op)"
+        touch "$out"
+      '';
+
   checks =
     pkgs:
     {
@@ -3229,6 +3547,16 @@ rec {
       modelLayersConnection = modelLayersConnection pkgs;
       modelLayersContextMatchesBackend = modelLayersContextMatchesBackend pkgs;
       llamaCudaVariantAvailable = llamaCudaVariantAvailable pkgs;
+    }
+    // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+      # The speech backend and its package are Linux-only (Vulkan + AVX2).
+      breezeTtsCatalog = breezeTtsCatalog pkgs;
+      breezeTtsPackage = breezeTtsPackage pkgs;
+      breezeTtsUnit = breezeTtsUnit pkgs;
+      breezeTtsAssertions = breezeTtsAssertions pkgs;
+      breezeTtsVramGuard = breezeTtsVramGuard pkgs;
+      breezeTtsSillyTavernWiring = breezeTtsSillyTavernWiring pkgs;
+      ttsAutoWiring = ttsAutoWiring pkgs;
     };
 
   packages = pkgs: { };

@@ -99,6 +99,13 @@
             src = source;
             version = (final.lib.importJSON ./version.json).version;
           };
+        }
+        // final.lib.optionalAttrs final.stdenv.hostPlatform.isLinux {
+          # The speech backend, alongside `sillytavern`. Not part of the
+          # default profile: importing `nixosModules.breeze-tts` is what turns
+          # it on, and the two are independent services.
+          breeze-tts = final.callPackage ./pkgs/breeze-tts-2 { vulkanSupport = true; };
+          breeze-tts-cpu = final.callPackage ./pkgs/breeze-tts-2 { vulkanSupport = false; };
         };
 
       overlay = mkOverlay;
@@ -118,6 +125,9 @@
         # and resource profile, and neither service should force the other on.
         # See modules/llama.nix.
         llama-cpp = ./modules/llama.nix;
+        # The speech backend. Also separate, for the same reasons, and with its
+        # own GPU/RAM guards. See modules/breeze-tts.nix.
+        breeze-tts = ./modules/breeze-tts.nix;
         default = self.nixosModules.sillytavern;
       };
 
@@ -147,6 +157,9 @@
           # attribute was missing, and nothing caught it. One line here is what
           # makes the suite able to.
           default = self.packages.${system}.sillytavern;
+        }
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          inherit (overlay pkgs pkgs) breeze-tts breeze-tts-cpu;
         }
         // (import ./lib/tests.nix { inherit lib nixpkgs; }).packages pkgs
       );

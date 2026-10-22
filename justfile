@@ -103,6 +103,26 @@ build:
 build-all:
     nix build {{flake}}#packages.{{system}}.default {{flake}}#checks.{{system}}.*
 
+# Build the Breeze TTS Vulkan package (the module's default backend).
+tts-build:
+    nix build {{flake}}#packages.{{system}}.breeze-tts
+
+# Build the CPU-only Breeze TTS package.
+tts-build-cpu:
+    nix build {{flake}}#packages.{{system}}.breeze-tts-cpu
+
+# The Breeze TTS evaluation checks: unit rendering, assertions, and the VRAM
+# guard run against a stubbed driver. No GPU and no weights needed.
+tts-test:
+    nix build -L --no-link {{flake}}#checks.{{system}}.breezeTtsCatalog {{flake}}#checks.{{system}}.breezeTtsPackage {{flake}}#checks.{{system}}.breezeTtsUnit {{flake}}#checks.{{system}}.breezeTtsAssertions {{flake}}#checks.{{system}}.breezeTtsVramGuard {{flake}}#checks.{{system}}.breezeTtsSillyTavernWiring
+
+# Live smoke test: builds the server, loads a real GGUF, generates a clip and
+# reports the real-time factor. Needs a GPU and the weights.
+#
+#   BREEZE_TTS_MODEL=/var/lib/breeze-tts/models/breeze-tts-2-q4_k.gguf just tts-live
+tts-live:
+    ./nix-tests/live/test_tts_server.sh
+
 # Build the package and leave a `result` symlink in the working tree.
 result:
     nix build {{flake}}#packages.{{system}}.sillytavern --out-link result
@@ -273,7 +293,7 @@ lint-nix-dead:
 
 # Lint the shell scripts. This is a gate — the tree is clean.
 lint-sh:
-    @just develop 'shellcheck nix-tests/home-eval.sh nix-tests/live/run.sh'
+    @just develop 'shellcheck nix-tests/home-eval.sh nix-tests/live/run.sh nix-tests/live/test_tts_server.sh'
 
 # Run every linter.
 lint-all: lint lint-sh lint-nix lint-nix-dead

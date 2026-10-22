@@ -257,6 +257,12 @@ services.sillytavern-nixos = {
     ollama_model = "llama3.1:8b";
   };
 
+  # A local SPEECH server is a third module, like the LLM one. It serves an
+  # OpenAI-compatible /v1/audio/speech and comes with VRAM/RAM guards.
+  #   imports = [ inputs.sillytavern.nixosModules.breeze-tts ];
+  #   services.breeze-tts-nixos = { enable = true; model = "q4_k"; };
+  # See docs/tts.md.
+
   # The models SillyTavern runs ITSELF — the ONNX weights behind the
   # extensions — in the Nix store, so they are never downloaded at runtime.
   models.byId."Xenova/whisper-small" = pkgs.fetchFromGitHub {
