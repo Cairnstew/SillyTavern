@@ -3261,8 +3261,9 @@ rec {
     assert lib.hasInfix "--chunk-max 40" unit.serviceConfig.ExecStart;
     assert lib.hasInfix "--split-chars 300" unit.serviceConfig.ExecStart;
     assert lib.hasInfix "--voices-dir /var/lib/breeze-tts/voices" unit.serviceConfig.ExecStart;
-    # model check + VRAM guard, in that order.
-    assert builtins.length unit.serviceConfig.ExecStartPre == 2;
+    # voices installer + model check + VRAM guard, in that order.
+    assert builtins.length unit.serviceConfig.ExecStartPre == 3;
+    assert builtins.elem (toString cfg.internal.voicesScript) (map toString unit.serviceConfig.ExecStartPre);
     # The Vulkan ICDs are wired, and the unit orders itself after the LLM.
     assert unit.environment.VK_ICD_FILENAMES
       == "/run/opengl-driver/share/vulkan/icd.d:/run/opengl-driver-32/share/vulkan/icd.d";
@@ -3323,6 +3324,13 @@ rec {
     assert count (base // { extraArgs = [ "--port=9999" ]; }) == 1;
     # An absolute StateDirectory.
     assert count (base // { stateDirectory = "/var/lib/breeze"; }) == 1;
+    # A voice name that would escape the voices directory.
+    assert count (
+      base
+      // {
+        voices."../escape".source = pkgs.writeText "escape.breeze" "BRZV";
+      }
+    ) == 1;
     pkgs.runCommand "sillytavern-check-breeze-tts-assertions" { }
       ''
         echo "PASS breeze-tts-assertions (weights, budget, backend, args)"
@@ -3377,6 +3385,116 @@ rec {
       PATH=/nonexistent ${cpuGuard} || { echo "cpu guard did not skip"; exit 1; }
 
       echo "PASS breeze-tts-vram-guard (fits passes, over-budget refuses, cpu skips)"
+      touch "$out"
+    '';
+
+  # The declared-voice surface: the option reaches the generated installer, the
+  # installer is first in ExecStartPre (before the server scans the directory),
+  # and both source shapes (a file and a package directory) are emitted.
+  breezeTtsVoices =
+    pkgs:
+    let
+      voiceFile = pkgs.writeText "Widowmaker.breeze" "BRZVpayload";
+      pack = pkgs.runCommand "voice-pack" { } ''
+        mkdir -p $out
+        printf '%s' 'BRZVana' > $out/Ana.breeze
+      '';
+      system = evalTts pkgs {
+        services.breeze-tts-nixos = {
+          enable = true;
+          model = "q4_k";
+          voices = {
+            Widowmaker.source = voiceFile;
+            Ana.source = pack;
+          };
+        };
+      };
+      cfg = system.config.services.breeze-tts-nixos;
+      unit = system.config.systemd.services.breeze-tts-nixos;
+      text = cfg.internal.voicesScriptText;
+    in
+    assert cfg.voices ? Widowmaker;
+    assert cfg.internal.voiceNames == [
+      "Ana"
+      "Widowmaker"
+    ];
+    assert builtins.elem (toString cfg.internal.voicesScript) (map toString unit.serviceConfig.ExecStartPre);
+    assert lib.hasInfix "install_voice Widowmaker " text;
+    assert lib.hasInfix "install_voice Ana " text;
+    assert lib.hasInfix (builtins.unsafeDiscardStringContext (toString voiceFile)) text;
+    assert lib.hasInfix (builtins.unsafeDiscardStringContext (toString pack)) text;
+    assert lib.hasInfix "magic != BRZV" text;
+    pkgs.runCommand "sillytavern-check-breeze-tts-voices" { }
+      ''
+        echo "PASS breeze-tts-voices (names, sources and the install step are wired)"
+        touch "$out"
+      '';
+
+  # The installer is shell, so exercise it: install, directory-form sources,
+  # magic rejection, ambiguity rejection, and cleanup that only touches files
+  # this module wrote.
+  breezeTtsVoicesInstall =
+    pkgs:
+    let
+      good = pkgs.writeText "good.breeze" "BRZVpayload";
+      bad = pkgs.writeText "bad.breeze" "NOPEpayload";
+      single = pkgs.runCommand "single-voice" { } ''
+        mkdir -p $out
+        printf '%s' 'BRZVsingle' > $out/wrapper.breeze
+      '';
+      ambiguous = pkgs.runCommand "ambiguous-voices" { } ''
+        mkdir -p $out
+        printf '%s' 'BRZVone' > $out/one.breeze
+        printf '%s' 'BRZVtwo' > $out/two.breeze
+      '';
+      mkInternal =
+        voices:
+        (evalTts pkgs {
+          services.breeze-tts-nixos = {
+            enable = true;
+            model = "q4_k";
+            inherit voices;
+          };
+        }).config.services.breeze-tts-nixos.internal;
+      two = mkInternal {
+        Widowmaker.source = good;
+        Ana.source = single;
+      };
+      one = mkInternal { Ana.source = single; };
+      badVoice = mkInternal { Bad.source = bad; };
+      ambiguousVoice = mkInternal { Ambiguous.source = ambiguous; };
+    in
+    pkgs.runCommand "sillytavern-check-breeze-tts-voices-install" { } ''
+      dir="$PWD/voices"
+      mkdir -p "$dir"
+      # A runtime-created voice, outside the module's manifest.
+      cp ${good} "$dir/Runtime.breeze"
+
+      ${two.voicesScript} "$dir"
+      test -f "$dir/Widowmaker.breeze"
+      test -f "$dir/Ana.breeze"
+      test "$(cat "$dir/Ana.breeze")" = "BRZVsingle"
+      test -f "$dir/Runtime.breeze"
+
+      # A second generation removes the dropped managed voice and nothing else.
+      ${one.voicesScript} "$dir"
+      test ! -e "$dir/Widowmaker.breeze"
+      test -f "$dir/Ana.breeze"
+      test -f "$dir/Runtime.breeze"
+
+      if ${badVoice.voicesScript} "$dir" 2>bad.err; then
+        echo "installer accepted a source without the BRZV magic"
+        exit 1
+      fi
+      ${pkgs.gnugrep}/bin/grep -q "magic != BRZV" bad.err
+
+      if ${ambiguousVoice.voicesScript} "$dir" 2>ambiguous.err; then
+        echo "installer accepted an ambiguous directory"
+        exit 1
+      fi
+      ${pkgs.gnugrep}/bin/grep -q "expected exactly one" ambiguous.err
+
+      echo "PASS breeze-tts-voices-install (install, cleanup, magic and ambiguity checks)"
       touch "$out"
     '';
 
@@ -3442,6 +3560,17 @@ rec {
         stBase
         breeze
       ];
+      withVoices = evalWith pkgs [
+        ../modules/breeze-tts.nix
+        modulePath
+        stBase
+        breeze
+        {
+          services.breeze-tts-nixos.voices.Widowmaker.source =
+            pkgs.writeText "Widowmaker.breeze" "BRZV";
+          services.sillytavern-nixos.tts.voices = [ "narrator" ];
+        }
+      ];
       withoutBreeze = evalWith pkgs [
         modulePath
         stBase
@@ -3487,6 +3616,10 @@ rec {
     assert (tts withBreeze)."OpenAI Compatible".provider_endpoint
       == "http://127.0.0.1:8137/v1/audio/speech";
     assert (tts withBreeze)."OpenAI Compatible".model == "tts-1";
+    assert (tts withVoices)."OpenAI Compatible".available_voices == [
+      "narrator"
+      "Widowmaker"
+    ];
     assert (tts withoutBreeze) == null;
     assert (tts overridden).currentProvider == "Custom";
     assert (tts endpointOverride)."OpenAI Compatible".provider_endpoint
@@ -3555,6 +3688,8 @@ rec {
       breezeTtsUnit = breezeTtsUnit pkgs;
       breezeTtsAssertions = breezeTtsAssertions pkgs;
       breezeTtsVramGuard = breezeTtsVramGuard pkgs;
+      breezeTtsVoices = breezeTtsVoices pkgs;
+      breezeTtsVoicesInstall = breezeTtsVoicesInstall pkgs;
       breezeTtsSillyTavernWiring = breezeTtsSillyTavernWiring pkgs;
       ttsAutoWiring = ttsAutoWiring pkgs;
     };

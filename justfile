@@ -114,7 +114,7 @@ tts-build-cpu:
 # The Breeze TTS evaluation checks: unit rendering, assertions, and the VRAM
 # guard run against a stubbed driver. No GPU and no weights needed.
 tts-test:
-    nix build -L --no-link {{flake}}#checks.{{system}}.breezeTtsCatalog {{flake}}#checks.{{system}}.breezeTtsPackage {{flake}}#checks.{{system}}.breezeTtsUnit {{flake}}#checks.{{system}}.breezeTtsAssertions {{flake}}#checks.{{system}}.breezeTtsVramGuard {{flake}}#checks.{{system}}.breezeTtsSillyTavernWiring
+    nix build -L --no-link {{flake}}#checks.{{system}}.breezeTtsCatalog {{flake}}#checks.{{system}}.breezeTtsPackage {{flake}}#checks.{{system}}.breezeTtsUnit {{flake}}#checks.{{system}}.breezeTtsAssertions {{flake}}#checks.{{system}}.breezeTtsVramGuard {{flake}}#checks.{{system}}.breezeTtsVoices {{flake}}#checks.{{system}}.breezeTtsVoicesInstall {{flake}}#checks.{{system}}.breezeTtsSillyTavernWiring
 
 # Live smoke test: builds the server, loads a real GGUF, generates a clip and
 # reports the real-time factor. Needs a GPU and the weights.

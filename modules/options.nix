@@ -3434,6 +3434,10 @@ equivalents.
           dropdown empty, which still works for reference-free voice design
           (the request sends no voice). Register voices on the server with
           `POST /v1/voices` and list their ids here.
+
+          Voices declared under `services.breeze-tts-nixos.voices` are added
+          automatically when the provider is `OpenAI Compatible`; this list is
+          for runtime-registered voices and is unioned with them.
         '';
       };
 

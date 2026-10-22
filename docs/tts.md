@@ -210,15 +210,84 @@ services.sillytavern-nixos.settingsExtra.extensionSettings.tts."OpenAI Compatibl
   (`src/endpoints/openai.js`). So `127.0.0.1` is correct even when the browser is
   remote, and **CORS is irrelevant** for this provider.
 - The API key field is ignored by the server; any value works.
-- `available_voices` is empty by default. An empty dropdown still works for
-  reference-free **voice design** (the request sends no voice); to pick a voice,
-  register one on the server with `POST /v1/voices` and list its id in
-  `tts.voices`.
+- `available_voices` starts empty, plus any names declared under
+  `services.breeze-tts-nixos.voices` (see §3a). An empty dropdown still works
+  for reference-free **voice design** (the request sends no voice); to pick a
+  runtime voice, register one on the server with `POST /v1/voices` and list its
+  id in `tts.voices`.
 - `speed` does nothing — the model has no speed control.
 - The server returns MP3 for SillyTavern's requests (the package builds the
   `shine` encoder). If MP3 is unavailable it sends WAV.
 - `tts.enable = true` with no backend enabled and no `tts.endpoint` emits a
   warning: there would be nothing to point at.
+
+---
+
+## 3a. Declarative voices (pre-encoded `.breeze` files)
+
+The server loads `--voices-dir` **once**, at startup. A `.breeze` file is the
+encoded artifact it loads: magic `BRZV`, the reference codes, transcript,
+description and metadata. A pack repo can ship one as a store path, so declaring
+a voice needs neither the model nor a GPU at activation:
+
+```nix
+services.breeze-tts-nixos.voices.Widowmaker.source =
+  inputs.overwatch-voice-lines.packages.${pkgs.system}.widowmaker-voice;
+```
+
+`source` may be the file itself or a directory containing it. A Nix package
+output is a directory, so the package above works directly; `<name>.breeze` is
+preferred, otherwise the directory must hold exactly one `*.breeze`.
+
+To produce one from a WAV and its transcript, encode it once on a machine with
+the model (this is not part of activation):
+
+```bash
+breeze-cli /var/lib/breeze-tts/models/breeze-tts-2-q4_k.gguf \
+  --ref-audio reference.wav \
+  --ref-text "$(cat reference.txt)" \
+  --save-voice Widowmaker \
+  --voices-dir ./voices
+```
+
+`--save-voice` writes `./voices/Widowmaker.breeze`; the server route
+(`POST /v1/voices`) produces the same format and also carries
+description/metadata. The output is the artifact this option installs.
+
+What the module does, as an `ExecStartPre` step before the server starts:
+
+- validates the file is non-empty and starts with `BRZV` — a WAV here fails the
+  unit with a clear message instead of being skipped at load time;
+- copies it to `/var/lib/<stateDirectory>/voices/<name>.breeze` as the service
+  user, mode `0640`, atomically (temp file + rename);
+- records the name in `/var/lib/<stateDirectory>/voices/.nix-managed`.
+
+The attribute name is the voice id: 1–64 letters, digits, dash or underscore.
+It becomes the filename, so anything looser is refused at evaluation.
+
+**Removal and ownership.** Deleting an entry removes the file the module
+installed on the next start. A voice created at runtime (`POST /v1/voices` with
+a `name`) is not in the manifest and is left alone. A name declared here is owned
+by Nix: a `PATCH` or re-registration under that name is replaced on the next
+start. Use a different name for runtime experiments.
+
+**Restarts.** Changing a source changes the generated install script, and the
+script embeds the store path, so systemd sees a changed unit and restarts the
+service. That is the only way a new blob is picked up: there is no reload
+endpoint.
+
+**Model family.** A `.breeze` embeds the model's sample rate and codebook
+count, so it is tied to the model *family*, not the quantisation. `q4_k` and
+`q8_0` blobs are interchangeable; a different TTS model requires regenerating
+every file. The upstream pack's `voice.json` records the model it was built
+with.
+
+**The dropdown follows.** When `services.sillytavern-nixos.tts.provider` is
+`OpenAI Compatible` (the default), the declared names are added to
+`available_voices` automatically. `tts.voices` still applies for
+runtime-registered voices; an explicit
+`settingsExtra.extensionSettings.tts` wins leaf by leaf, including replacing
+the list.
 
 ---
 

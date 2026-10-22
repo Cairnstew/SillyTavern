@@ -331,6 +331,100 @@
     lib.mapAttrs' (name: value: lib.nameValuePair systemdHardwareName.${name} value) cfg.hardware
   );
 
+  # ── Declarative voices ──────────────────────────────────────────────────────
+  #
+  # A `.breeze` file is the encoded artifact `breeze-server` loads at startup.
+  # A pack repo can ship one as a store path; this copies it into the voices
+  # directory BEFORE `ExecStart`, because `load_voice_dir()` runs once. A file
+  # dropped in while the server is running is invisible until a restart.
+  #
+  # The manifest records only what this module installed. That makes removing a
+  # declared voice clean up its file, while a voice created at runtime (POST
+  # /v1/voices with a name) is left alone.
+  voiceNames = lib.attrNames cfg.voices;
+
+  voiceInstalls = lib.concatStringsSep "\n" (
+    lib.mapAttrsToList (
+      name: voice:
+      "install_voice ${lib.escapeShellArg name} ${lib.escapeShellArg (toString voice.source)}"
+    ) cfg.voices
+  );
+
+  voicesScriptText = ''
+    set -euo pipefail
+
+    # The unit invokes this with no arguments. The optional argument is the test
+    # hook: `nix flake check` runs the same script against a temporary dir.
+    dir=''${1:-/var/lib/${cfg.stateDirectory}/voices}
+    managed="$dir/.nix-managed"
+    ${pkgs.coreutils}/bin/mkdir -p "$dir"
+
+    declare -A wanted=()
+
+    die() {
+      echo "ERROR: services.breeze-tts-nixos.voices: $*" >&2
+      exit 1
+    }
+
+    install_voice() {
+      local name="$1"
+      local src="$2"
+      local dst="$dir/$name.breeze"
+
+      # A Nix package output is a directory. Accept the file itself, a
+      # directory holding <name>.breeze, or a directory holding exactly one
+      # *.breeze. The last form lets a single-character pack be declared
+      # without knowing the filename it chose.
+      if [ -d "$src" ]; then
+        if [ -f "$src/$name.breeze" ]; then
+          src="$src/$name.breeze"
+        else
+          shopt -s nullglob
+          local matches=("$src"/*.breeze)
+          shopt -u nullglob
+          if [ "''${#matches[@]}" -ne 1 ]; then
+            die "voice '$name': '$src' holds ''${#matches[@]} .breeze files; expected exactly one (or $name.breeze)"
+          fi
+          src="''${matches[0]}"
+        fi
+      fi
+
+      [ -f "$src" ] || die "voice '$name': '$src' is not a file"
+      [ -s "$src" ] || die "voice '$name': '$src' is empty"
+      [ "$(${pkgs.coreutils}/bin/head -c 4 "$src")" = "BRZV" ] \
+        || die "voice '$name': '$src' is not a .breeze file (magic != BRZV)"
+
+      wanted["$name"]=1
+
+      ${pkgs.coreutils}/bin/install -m 0640 "$src" "$dst.tmp"
+      ${pkgs.coreutils}/bin/mv -f "$dst.tmp" "$dst"
+      echo "breeze-tts: installed voice '$name' from '$src'"
+    }
+
+    ${voiceInstalls}
+
+    # Remove only files this module installed in a previous generation. A voice
+    # created at runtime is not in the manifest and is deliberately untouched.
+    if [ -f "$managed" ]; then
+      while IFS= read -r old; do
+        [ -n "$old" ] || continue
+        if [ -z "''${wanted[$old]+x}" ]; then
+          ${pkgs.coreutils}/bin/rm -f "$dir/$old.breeze"
+          echo "breeze-tts: removed managed voice '$old'"
+        fi
+      done < "$managed"
+    fi
+
+    if [ "''${#wanted[@]}" -gt 0 ]; then
+      printf '%s\n' "''${!wanted[@]}" | ${pkgs.coreutils}/bin/sort > "$managed.tmp"
+    else
+      : > "$managed.tmp"
+    fi
+    ${pkgs.coreutils}/bin/mv -f "$managed.tmp" "$managed"
+  '';
+
+  voicesScript = pkgs.writeShellScript "breeze-tts-voices" voicesScriptText;
+
   serverArgs =
     [
       resolvedWeights
@@ -746,6 +840,57 @@ in {
       description = "`TimeoutStartSec`. Loading several GiB from disk can take minutes.";
     };
 
+    voices = mkOption {
+      type = types.attrsOf (types.submodule {
+        options.source = mkOption {
+          type = types.path;
+          description = ''
+            A pre-encoded `.breeze` voice file, or a directory containing it. A
+            Nix package output is a directory, so both forms are accepted: when
+            it is a directory, `<name>.breeze` is preferred and otherwise
+            exactly one `*.breeze` is required.
+          '';
+        };
+      });
+      default = { };
+      example = literalExpression ''
+        {
+          Widowmaker.source =
+            inputs.overwatch-voice-lines.packages.''${pkgs.system}.widowmaker-voice;
+        }
+      '';
+      description = ''
+        Pre-encoded voices, installed into the unit's voices directory before
+        the server starts.
+
+        The attribute name is the voice id: it must be 1–64 letters, digits,
+        dash or underscore (upstream turns it into a filename), and it is
+        installed as `/var/lib/<stateDirectory>/voices/<name>.breeze`.
+
+        The file is validated (`BRZV` magic) and copied atomically as the
+        service user, so a source that is not a `.breeze` file fails the unit
+        before the server ever sees it. This is a *copy* into `/var/lib`, not a
+        symlink: the server reads it, and `PATCH`/`DELETE` keep operating on a
+        normal file.
+
+        Removing an entry deletes the file this module installed on the next
+        start. Voices created at runtime (for example with `POST /v1/voices`)
+        are not in the manifest and are left alone. A name declared here is
+        owned by Nix: a runtime `PATCH` or re-registration under the same name
+        is replaced on the next start.
+
+        `breeze-server` reads the directory only at startup
+        (`load_voice_dir()`), so changing a source restarts the unit. The
+        generated install script embeds the store path, which is what makes
+        systemd notice the change.
+
+        A `.breeze` embeds the model's sample rate and codebook count: it is
+        tied to the model FAMILY, not the quantisation. `q4_k` and `q8_0`
+        blobs are interchangeable; a different TTS model requires regenerating
+        every file.
+      '';
+    };
+
     hardware = mkOption {
       type = hardware;
       default = {};
@@ -878,7 +1023,17 @@ in {
         assertion = cfg.user != "" && cfg.group != "";
         message = "services.breeze-tts-nixos: `user` and `group` must not be empty.";
       }
-    ];
+    ]
+    ++ lib.mapAttrsToList (name: _: {
+      assertion = builtins.match "[A-Za-z0-9_-]{1,64}" name != null;
+      message = ''
+        services.breeze-tts-nixos: voices.${name} is not a valid voice name.
+
+        The name becomes `<name>.breeze` in the voices directory and is the
+        voice id the server reports. Use 1–64 letters, digits, dash or
+        underscore; anything else could name a file outside the directory.
+      '';
+    }) cfg.voices;
 
     warnings =
       [
@@ -945,8 +1100,13 @@ in {
       serviceConfig =
         {
           Type = "simple";
+          # Voices BEFORE the model and VRAM checks: the server only scans
+          # `--voices-dir` at startup, so installing them here is what makes a
+          # declared voice part of the same start. A bad blob fails the unit
+          # before the model is loaded.
           ExecStartPre =
-            optional cfg.downloadModel fetchModel
+            [voicesScript]
+            ++ optional cfg.downloadModel fetchModel
             ++ [modelCheck]
             ++ optional (cfg.backend == "vulkan" && cfg.gpu.checkAtStart) vramGuard;
           ExecStart = "${lib.getExe' cfg.package "breeze-server"} ${lib.escapeShellArgs serverArgs}";
@@ -1007,6 +1167,9 @@ in {
         reservedInExtraArgs
         resolvedWeights
         serverArgs
+        voiceNames
+        voicesScript
+        voicesScriptText
         weightsSources
         ;
       modelCatalog = modelCatalog;

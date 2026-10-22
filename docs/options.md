@@ -633,6 +633,19 @@ account's `settings.json` (opt out with
 card, the quantisation ladder, both overload guards and the wiring options — is
 **[`tts.md`](tts.md)**.
 
+Voices are files. A pack repo can ship a pre-encoded `.breeze` and the module
+installs it before the server scans the directory:
+
+```nix
+services.breeze-tts-nixos.voices.Widowmaker.source =
+  inputs.overwatch-voice-lines.packages.${pkgs.system}.widowmaker-voice;
+```
+
+The attribute name is the voice id; the file is validated (`BRZV`) and copied
+into `/var/lib/<stateDirectory>/voices/`, and declared names are added to
+SillyTavern's TTS dropdown automatically. `tts.md` §3a covers install, removal
+and the model-family caveat.
+
 Two things to know before reaching for it:
 
 - the **weights are non-commercial**; the source is Apache-2.0, the model is not;

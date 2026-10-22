@@ -723,6 +723,18 @@ let
     else
       null;
 
+  # Voices declared under `services.breeze-tts-nixos.voices` have known ids:
+  # they are exactly the filenames the server loads. Add them to the dropdown so
+  # the UI and the server cannot drift. `or {}` keeps this module usable with a
+  # Breeze module that predates the `voices` option, and the provider check
+  # avoids putting Breeze ids into a list that another provider owns.
+  managedTtsVoices =
+    if breezeTts != null && (breezeTts.enable or false) && cfg.tts.provider == "OpenAI Compatible"
+    then lib.attrNames (breezeTts.voices or { })
+    else [ ];
+
+  availableTtsVoices = lib.unique (cfg.tts.voices ++ managedTtsVoices);
+
   # `{}` unless there is an endpoint to point at, so the merge below is a no-op
   # for every configuration that does not enable a speech backend.
   ttsExtensionSettings = lib.optionalAttrs (cfg.tts.autoConfigure && ttsEndpoint != null) {
@@ -732,7 +744,7 @@ let
       ${cfg.tts.provider} = {
         provider_endpoint = ttsEndpoint;
         model = cfg.tts.model;
-        available_voices = cfg.tts.voices;
+        available_voices = availableTtsVoices;
         voiceMap = { };
         speed = 1;
       };
