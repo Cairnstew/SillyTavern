@@ -1,0 +1,499 @@
+diff --git a/apps/server/main.cpp b/apps/server/main.cpp
+index 6f1f556..58f111c 100644
+--- a/apps/server/main.cpp
++++ b/apps/server/main.cpp
+@@ -11,7 +11,8 @@ int main(int argc, char ** argv) {
+         printf("usage: breeze-server <model.gguf> [--host H] [--port P] [--webui] [--cpu]\n");
+         printf("                     [--chunk-first N] [--chunk-max N] [--verbose]\n");
+         printf("                     [--voices-dir PATH] [--ws-port P] [--split-chars N]\n");
+-        printf("                     [--cors [ORIGINS]] [--no-warmup]\n");
++        printf("                     [--cors [ORIGINS]] [--no-warmup] [--idle-unload-seconds N]\n");
++        printf("                     [--reload-guard PATH]\n");
+         printf("\n");
+         printf("  --chunk-first  frames in the first streamed chunk, lower starts sooner (default 4)\n");
+         printf("  --chunk-max    frames the chunk ramps up to, higher is more efficient (default 25)\n");
+@@ -27,6 +28,10 @@ int main(int argc, char ** argv) {
+         printf("                 http://localhost:5173,https://app.example.com to allow only those\n");
+         printf("  --no-warmup    skip the short throwaway generation at startup, the first request\n");
+         printf("                 then pays for setting up the gpu pipelines instead\n");
++        printf("  --idle-unload-seconds  seconds of inactivity before the model is unloaded,\n");
++        printf("                 the next request reloads it (default 0, keeps it resident)\n");
++        printf("  --reload-guard run this executable before reloading; a non-zero exit refuses the\n");
++        printf("                 reload. only meaningful with --idle-unload-seconds\n");
+         return argc < 2 ? 1 : 0;
+     }
+     ServerOptions opts;
+@@ -44,6 +49,8 @@ int main(int argc, char ** argv) {
+         else if (a == "--chunk-max" && i + 1 < argc) opts.chunk_max = atoi(argv[++i]);
+         else if (a == "--split-chars" && i + 1 < argc) opts.split_chars = atoi(argv[++i]);
+         else if (a == "--no-warmup") opts.warmup = false;
++        else if (a == "--idle-unload-seconds" && i + 1 < argc) opts.idle_unload_seconds = atoi(argv[++i]);
++        else if (a == "--reload-guard" && i + 1 < argc) opts.reload_guard = argv[++i];
+         else if (a == "--cors") {
+             // the origin list is optional. origins always start with a scheme, so anything
+             // starting with a dash is the next flag rather than a value for this one
+@@ -53,6 +60,10 @@ int main(int argc, char ** argv) {
+         else { fprintf(stderr, "unknown arg: %s\n", a.c_str()); return 1; }
+     }
+     if (opts.split_chars < 0) opts.split_chars = 0;
++    if (opts.idle_unload_seconds < 0) {
++        fprintf(stderr, "idle unload seconds must be at least 0\n");
++        return 1;
++    }
+     if (opts.chunk_first < 1 || opts.chunk_max < 1) {
+         fprintf(stderr, "chunk sizes must be at least 1\n");
+         return 1;
+diff --git a/apps/server/server.cpp b/apps/server/server.cpp
+index 6ffc098..72be86a 100644
+--- a/apps/server/server.cpp
++++ b/apps/server/server.cpp
+@@ -16,15 +16,25 @@
+ #include <windows.h> // after httplib, it pulls in winsock2 first
+ #endif
+ 
++#include <atomic>
+ #include <chrono>
++#include <cstdint>
++#include <cstdlib>
+ #include <cstdio>
+ #include <memory>
+ #include <mutex>
+ #include <string>
++#include <thread>
+ #include <vector>
+ 
+ namespace breeze {
+ 
++static int64_t now_ms() {
++    return std::chrono::duration_cast<std::chrono::milliseconds>(
++               std::chrono::steady_clock::now().time_since_epoch())
++        .count();
++}
++
+ static std::string mmss(double s) {
+     if (!(s >= 0) || s > 86399) s = 0;
+     char buf[16];
+@@ -133,19 +143,55 @@ int run_server(const ServerOptions & opts) {
+         }
+     }
+ 
++    // The model is freed after an idle period and loaded again by the next request. `ensure_loaded`
++    // is only called with `mutex` held, which is the same lock a generation or voice encoding holds.
++    std::atomic<bool> model_loaded{true};
++    std::atomic<int64_t> last_activity_ms{now_ms()};
++    std::atomic<bool> stopping{false};
++    const auto touch = [&] {
++        last_activity_ms.store(now_ms(), std::memory_order_relaxed);
++    };
++    const auto ensure_loaded = [&]() -> bool {
++        if (stopping.load(std::memory_order_relaxed)) return false;
++        if (model_loaded.load(std::memory_order_acquire)) return true;
++        if (!opts.reload_guard.empty()) {
++            const int rc = std::system(opts.reload_guard.c_str());
++            if (rc != 0) {
++                fprintf(stderr, "reload guard refused to reload the model\n");
++                return false;
++            }
++        }
++        printf("reloading %s ...\n", opts.model.c_str());
++        fflush(stdout);
++        if (!model.load(opts.model, opts.use_gpu)) {
++            fprintf(stderr, "failed to reload model\n");
++            model.free();
++            return false;
++        }
++        codec.init(model);
++        model_loaded.store(true, std::memory_order_release);
++        touch();
++        printf("reloaded\n");
++        fflush(stdout);
++        return true;
++    };
++    ModelHooks hooks;
++    hooks.touch = touch;
++    hooks.ensure_loaded = ensure_loaded;
++
+     httplib::Server svr;
+     auto mutex = std::make_shared<std::mutex>();
+     const int sr = model.cfg.sample_rate;
+ 
+     VoiceStore store;
+     store.load_dir(opts.voices_dir, model.cfg.num_codebooks);
+-    store.add_routes(svr, model, codec, *mutex, opts.voices_dir);
++    store.add_routes(svr, model, codec, *mutex, opts.voices_dir, hooks);
+ 
+     WsServer ws;
+     const int ws_port = opts.ws_port == 0 ? opts.port + 1 : opts.ws_port;
+     if (ws_port > 0) {
+         const bool up = ws.start(opts.host, ws_port, [&](WsConn & c) {
+-            ws_connection(c, model, codec, store, *mutex, opts.chunk_first, opts.chunk_max, opts.split_chars);
++            ws_connection(c, model, codec, store, *mutex, opts.chunk_first, opts.chunk_max, opts.split_chars, hooks);
+         });
+         if (up) printf("websocket on ws://%s:%d\n", opts.host.c_str(), ws_port);
+         else fprintf(stderr, "could not open the websocket port %d\n", ws_port);
+@@ -185,7 +231,7 @@ int run_server(const ServerOptions & opts) {
+         fflush(stdout);
+ 
+         res.set_chunked_content_provider(
+-            ctype, [&model, &codec, g = o.g, sse = o.sse, enc, lock, sr, verbose = opts.verbose](
++            ctype, [&model, &codec, &hooks, g = o.g, sse = o.sse, enc, lock, sr, verbose = opts.verbose](
+                        size_t, httplib::DataSink & sink) {
+                 std::string buf;
+                 const auto flush = [&] {
+@@ -210,11 +256,13 @@ int run_server(const ServerOptions & opts) {
+                     }
+                 }
+                 sink.done();
++                hooks.touch();
+                 return true;
+             });
+     };
+ 
+     svr.Post("/v1/audio/speech", [&, mutex](const httplib::Request & req, httplib::Response & res) {
++        hooks.touch();
+         const bool json = req.get_header_value("Content-Type").find("json") != std::string::npos;
+         auto lock = std::make_shared<std::unique_lock<std::mutex>>(*mutex, std::try_to_lock);
+         if (!*lock) {
+@@ -224,6 +272,13 @@ int run_server(const ServerOptions & opts) {
+                             "application/json");
+             return;
+         }
++        if (!ensure_loaded()) {
++            res.status = 503;
++            res.set_content(json ? openai_error("model unavailable", "server_error")
++                                 : "{\"error\":\"model unavailable\"}",
++                            "application/json");
++            return;
++        }
+         if (json) {
+             speak_openai(req, res, lock);
+             return;
+@@ -312,23 +367,30 @@ int run_server(const ServerOptions & opts) {
+ 
+         res.set_chunked_content_provider(
+             "audio/pcm",
+-            [&model, &codec, g, lock, sr, verbose = opts.verbose](size_t, httplib::DataSink & sink) {
++            [&model, &codec, &hooks, g, lock, sr, verbose = opts.verbose](size_t, httplib::DataSink & sink) {
+                 run_generation(model, codec, g, sr, verbose, [&](const float * s, int n) {
+                     const std::vector<uint8_t> pcm = to_pcm16(s, n);
+                     return sink.write((const char *) pcm.data(), pcm.size());
+                 });
+                 sink.done();
++                hooks.touch();
+                 return true;
+             });
+     });
+ 
+     svr.Post("/v1/audio/convert", [&, mutex](const httplib::Request & req, httplib::Response & res) {
++        hooks.touch();
+         std::unique_lock<std::mutex> lock(*mutex, std::try_to_lock);
+         if (!lock) {
+             res.status = 409;
+             res.set_content("{\"error\":\"busy\"}", "application/json");
+             return;
+         }
++        if (!ensure_loaded()) {
++            res.status = 503;
++            res.set_content("{\"error\":\"model unavailable\"}", "application/json");
++            return;
++        }
+         std::vector<float> src, ref;
+         const auto load = [&](const char * name, std::vector<float> & out) {
+             if (!req.has_file(name)) return false;
+@@ -387,6 +449,7 @@ int run_server(const ServerOptions & opts) {
+             res.set_header("X-Sample-Rate", std::to_string(sr));
+             res.set_header("X-Sample-Format", "s16le");
+             res.set_content((const char *) pcm.data(), pcm.size(), "audio/pcm");
++            hooks.touch();
+         } catch (const std::exception & e) {
+             fprintf(stderr, "conversion error: %s\n", e.what());
+             res.status = 500;
+@@ -428,11 +491,48 @@ int run_server(const ServerOptions & opts) {
+     }
+ 
+     printf("listening on http://%s:%d\n", opts.host.c_str(), opts.port);
++
++    std::thread idle_thread;
++    if (opts.idle_unload_seconds > 0) {
++        idle_thread = std::thread([&] {
++            const int64_t timeout_ms = (int64_t) opts.idle_unload_seconds * 1000;
++            while (!stopping.load(std::memory_order_relaxed)) {
++                std::this_thread::sleep_for(std::chrono::milliseconds(500));
++                if (!model_loaded.load(std::memory_order_acquire)) continue;
++                if (now_ms() - last_activity_ms.load(std::memory_order_relaxed) < timeout_ms) continue;
++
++                // Re-check under the device lock: a request may have started while this thread
++                // was waiting, and generation holds the same lock for its whole duration.
++                std::unique_lock<std::mutex> lock(*mutex, std::try_to_lock);
++                if (!lock) continue;
++                if (!model_loaded.load(std::memory_order_acquire)) continue;
++                if (now_ms() - last_activity_ms.load(std::memory_order_relaxed) < timeout_ms) continue;
++
++                printf("unloading model after %d seconds idle\n", opts.idle_unload_seconds);
++                fflush(stdout);
++                model.free();
++                model_loaded.store(false, std::memory_order_release);
++            }
++        });
++    }
++
++    const auto shutdown = [&] {
++        stopping.store(true);
++        ws.stop();
++        if (idle_thread.joinable()) idle_thread.join();
++        std::lock_guard<std::mutex> lock(*mutex);
++        if (model_loaded.load()) {
++            model.free();
++            model_loaded.store(false);
++        }
++    };
++
+     if (!svr.listen(opts.host, opts.port)) {
++        shutdown();
+         fprintf(stderr, "failed to bind %s:%d\n", opts.host.c_str(), opts.port);
+         return 1;
+     }
+-    model.free();
++    shutdown();
+     return 0;
+ }
+ 
+diff --git a/apps/server/server.h b/apps/server/server.h
+index 4d89336..deb0a60 100644
+--- a/apps/server/server.h
++++ b/apps/server/server.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include <functional>
+ #include <string>
+ 
+ namespace breeze {
+@@ -17,9 +18,18 @@ struct ServerOptions {
+     int chunk_max = 25;
+     int split_chars = 600; // 0 keeps long text in a single pass
+     bool warmup = true;
++    int idle_unload_seconds = 0; // 0 keeps the model resident for the process lifetime
++    std::string reload_guard; // optional executable run before a reload; non-zero refuses it
+     std::string cors; // empty turns cors off, "*" allows any origin, otherwise a comma separated allowlist
+ };
+ 
++// The model can be dropped after an idle period and reloaded by the next request. `touch` records
++// activity; `ensure_loaded` is called with the gpu mutex held and reloads if necessary.
++struct ModelHooks {
++    std::function<void()> touch;
++    std::function<bool()> ensure_loaded;
++};
++
+ int run_server(const ServerOptions & opts);
+ 
+ }
+diff --git a/apps/server/voices.cpp b/apps/server/voices.cpp
+index c9ba06e..d671c14 100644
+--- a/apps/server/voices.cpp
++++ b/apps/server/voices.cpp
+@@ -244,7 +244,7 @@ void VoiceStore::put(const std::string & id, CachedVoice v) {
+ }
+ 
+ void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCodec & codec,
+-                            std::mutex & gpu, const std::string & dir) {
++                            std::mutex & gpu, const std::string & dir, const ModelHooks & hooks) {
+     const int sr = model.cfg.sample_rate;
+     const int spf = model.cfg.samples_per_frame;
+     const int ncb = model.cfg.num_codebooks;
+@@ -263,6 +263,7 @@ void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCode
+     };
+ 
+     svr.Post("/v1/voices", [&, sr, spf, write_file](const httplib::Request & req, httplib::Response & res) {
++        hooks.touch();
+         const std::string text = field(req, "ref_text", "");
+         const std::string name = field(req, "name", "");
+         if (!req.has_file("ref_audio") || text.empty())
+@@ -304,11 +305,13 @@ void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCode
+         // encoding runs on the same device generation does, so it waits its turn
+         std::unique_lock<std::mutex> lock(gpu, std::try_to_lock);
+         if (!lock) return fail(res, 409, "busy");
++        if (!hooks.ensure_loaded()) return fail(res, 503, "model unavailable");
+ 
+         v.text = text;
+         const auto t0 = std::chrono::steady_clock::now();
+         v.codes = codec.encode(pcm, v.frames);
+         v.encode_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
++        hooks.touch();
+ 
+         if (!name.empty()) {
+             if (!write_file(name, v)) return fail(res, 500, "could not write the voice file");
+diff --git a/apps/server/voices.h b/apps/server/voices.h
+index ead9b00..c8ab9d6 100644
+--- a/apps/server/voices.h
++++ b/apps/server/voices.h
+@@ -2,6 +2,7 @@
+ 
+ #include "breeze/codec.h"
+ #include "breeze/model.h"
++#include "server.h"
+ 
+ #include "httplib.h"
+ 
+@@ -61,7 +62,7 @@ public:
+     void put(const std::string & id, CachedVoice v);
+ 
+     void add_routes(httplib::Server & svr, BreezeModel & model, MimiCodec & codec, std::mutex & gpu,
+-                    const std::string & dir);
++                    const std::string & dir, const ModelHooks & hooks);
+ 
+ private:
+     std::map<std::string, CachedVoice> m_voices;
+diff --git a/apps/server/ws_api.cpp b/apps/server/ws_api.cpp
+index 6ad2966..589ddf3 100644
+--- a/apps/server/ws_api.cpp
++++ b/apps/server/ws_api.cpp
+@@ -136,7 +136,7 @@ static void event(WsConn & c, const std::string & type, const std::string & extr
+ }
+ 
+ // drains the queue one piece at a time, taking the gpu lock for each so other connections interleave
+-static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
++static void speaker(WsConn & conn, Session & s, std::mutex & gpu, const ModelHooks & hooks) {
+     for (;;) {
+         Piece piece;
+         {
+@@ -157,6 +157,13 @@ static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
+         }
+         if (s.cancel) { s.cancel = false; continue; }
+ 
++        hooks.touch();
++        if (!hooks.ensure_loaded()) {
++            hold.unlock();
++            event(conn, "error", "\"message\":\"model unavailable\"");
++            continue;
++        }
++
+         {
+             std::lock_guard<std::mutex> lock(s.mu);
+             s.gen.set_instruction(piece.instruction);
+@@ -171,6 +178,7 @@ static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
+             return conn.send_binary(pcm.data(), pcm.size());
+         });
+         hold.unlock();
++        hooks.touch();
+ 
+         if (s.cancel) { event(conn, "cancelled"); s.cancel = false; continue; }
+         if (!ok && !conn.alive()) return;
+@@ -184,8 +192,9 @@ static void speaker(WsConn & conn, Session & s, std::mutex & gpu) {
+ }
+ 
+ static void handle_start(WsConn & conn, Session & s, const std::string & msg, BreezeModel & model,
+-                         MimiCodec & codec, VoiceStore & store, int chunk_first, int chunk_max,
+-                         int split_chars) {
++                         MimiCodec & codec, VoiceStore & store, std::mutex & gpu, int chunk_first,
++                         int chunk_max, int split_chars, const ModelHooks & hooks) {
++    hooks.touch();
+     GenRequest g;
+     const std::string ins = json_str(msg, "instruction");
+     g.instruction = ins.empty() ? "Speak clearly and naturally." : ins;
+@@ -214,13 +223,32 @@ static void handle_start(WsConn & conn, Session & s, const std::string & msg, Br
+     if (d.repetition_penalty) g.repetition_penalty = *d.repetition_penalty;
+     if (d.max_new_tokens) g.max_new_tokens = *d.max_new_tokens;
+ 
+-    std::lock_guard<std::mutex> lock(s.mu);
++    // begin() may encode a reference clip, so it needs the same device lock as generation.
++    // Take the session lock first: waiting for the device while holding it only blocks this
++    // connection, whereas holding the device while waiting for the session lock blocks every
++    // other connection too.
++    std::unique_lock<std::mutex> lock(s.mu);
++    std::unique_lock<std::mutex> hold(gpu, std::try_to_lock);
++    if (!hold) {
++        lock.unlock();
++        event(conn, "error", "\"message\":\"busy\"");
++        return;
++    }
++    if (!hooks.ensure_loaded()) {
++        lock.unlock();
++        hold.unlock();
++        event(conn, "error", "\"message\":\"model unavailable\"");
++        return;
++    }
++
+     s.instruction = g.instruction;
+     s.budget = (int) json_num(msg, "split_chars", split_chars);
+     if (d.split_chars && !json_has(msg, "split_chars")) s.budget = *d.split_chars;
+     // streaming drains sentence by sentence, so it always needs a real budget to aim at
+     if (s.budget <= 0) s.budget = 600;
+     s.gen.begin(model, codec, g);
++    hooks.touch();
++    hold.unlock();
+     s.started = true;
+     s.queue.clear();
+     s.buffer.clear();
+@@ -229,19 +257,21 @@ static void handle_start(WsConn & conn, Session & s, const std::string & msg, Br
+ }
+ 
+ void ws_connection(WsConn & conn, BreezeModel & model, MimiCodec & codec, VoiceStore & store,
+-                   std::mutex & gpu, int chunk_first, int chunk_max, int split_chars) {
++                   std::mutex & gpu, int chunk_first, int chunk_max, int split_chars,
++                   const ModelHooks & hooks) {
+     Session s;
+-    std::thread worker([&] { speaker(conn, s, gpu); });
++    std::thread worker([&] { speaker(conn, s, gpu, hooks); });
+     event(conn, "ready", "\"sample_rate\":24000,\"format\":\"s16le\"");
+ 
+     std::string msg;
+     bool binary = false;
+     while (conn.recv(msg, binary)) {
++        hooks.touch();
+         if (binary) continue;
+         const std::string type = json_str(msg, "type");
+ 
+         if (type == "start") {
+-            handle_start(conn, s, msg, model, codec, store, chunk_first, chunk_max, split_chars);
++            handle_start(conn, s, msg, model, codec, store, gpu, chunk_first, chunk_max, split_chars, hooks);
+             continue;
+         }
+         if (!s.started) {
+diff --git a/apps/server/ws_api.h b/apps/server/ws_api.h
+index 748f02b..4b04ba8 100644
+--- a/apps/server/ws_api.h
++++ b/apps/server/ws_api.h
+@@ -2,6 +2,7 @@
+ 
+ #include "voices.h"
+ #include "ws.h"
++#include "server.h"
+ 
+ #include "breeze/codec.h"
+ #include "breeze/model.h"
+@@ -14,6 +15,7 @@ namespace breeze {
+ // handles one websocket connection until it closes. generation still serialises on gpu, a
+ // connection that arrives mid generation waits its turn rather than being turned away
+ void ws_connection(WsConn & conn, BreezeModel & model, MimiCodec & codec, VoiceStore & store,
+-                   std::mutex & gpu, int chunk_first, int chunk_max, int split_chars);
++                   std::mutex & gpu, int chunk_first, int chunk_max, int split_chars,
++                   const ModelHooks & hooks);
+ 
+ } // namespace breeze
+diff --git a/src/gguf_loader.cpp b/src/gguf_loader.cpp
+index e042aef..198f3fb 100644
+--- a/src/gguf_loader.cpp
++++ b/src/gguf_loader.cpp
+@@ -47,6 +47,7 @@ void GGUFModel::free() {
+     buffer = nullptr;
+     meta = nullptr;
+     gguf = nullptr;
++    tensors.clear();
+ }
+ 
+ ggml_tensor * GGUFModel::find(const std::string & name) const {
+diff --git a/src/model.cpp b/src/model.cpp
+index 8351e2d..cbf90cc 100644
+--- a/src/model.cpp
++++ b/src/model.cpp
+@@ -13,6 +13,9 @@ bool BreezeModel::load(const std::string & path, bool prefer_gpu) {
+ void BreezeModel::free() {
+     gg.free();
+     backend.free();
++    // A reload calls load() on the same object. Reset the tokenizer's maps so
++    // the special-token list does not grow on every idle reload.
++    tok = Tokenizer{};
+ }
+ 
+ }

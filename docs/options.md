@@ -587,6 +587,16 @@ load-on-startup = true
 
 so the string SillyTavern sends as `"model"` is the section name.
 
+**Idle offload.** A loaded model is put to sleep after
+`router.idleUnloadSeconds` of inactivity (default `900`). llama.cpp drops the
+weights and KV cache; the next inference request reloads them. `null` keeps
+models resident. The flag is passed to `llama serve` directly because this
+llama.cpp version has no `LLAMA_ARG_SLEEP_IDLE_SECONDS` environment mapping.
+Provider metadata (`/health`, `/props`, `/models`, `/metrics`) does not count as
+activity; only inference does. The first request after sleeping pays the model
+load again, so this is a memory/latency trade. The flag exists in llama.cpp
+0.6.0; an older `package` will reject it.
+
 **Weights** are operator-managed by default: `weights.path` is an absolute path
 the module never creates. For a pinned, store-backed copy, use
 `weights.url` + `weights.hash`; the module fetches it with `pkgs.fetchurl`.
@@ -654,6 +664,15 @@ Two things to know before reaching for it:
 - the **VRAM guard is the point** of the module. Vulkan and systemd both lack a
   per-process device-memory limit, so the module checks a static budget at
   evaluation time and the driver's real free VRAM at start.
+
+**Idle unload.** `idleUnloadSeconds` defaults to `900`. After that much
+inactivity the server frees the model and its VRAM; the next request reloads it
+lazily and pays the load plus pipeline setup. `null` keeps it resident. When
+`backend = "vulkan"` and `gpu.checkAtStart = true`, the same free-VRAM preflight
+runs before a reload (`--reload-guard`), so a reload that no longer fits — for
+example because the LLM has taken the memory — returns 503 instead of loading
+anyway. The first request after idle is therefore both slower and subject to the
+same VRAM contract as startup.
 
 ## Model layers: settings that follow a model
 

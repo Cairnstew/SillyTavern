@@ -64,7 +64,14 @@ in
     # `<name>.json` next to `<name>.breeze` supplies instruction/cfg/seed/
     # sampling, and an explicit request field still wins. The module writes the
     # sidecar; the browser UI and curl get the same defaults from the server.
-    patches = [ ./voice-defaults.patch ];
+    #
+    # The idle-unload patch adds `--idle-unload-seconds`: the server frees the
+    # model (and its VRAM) after that much inactivity and reloads it lazily on
+    # the next request. It is fork-local because upstream has no equivalent.
+    patches = [
+      ./voice-defaults.patch
+      ./idle-unload.patch
+    ];
 
     # The flake source has empty `third_party/*` directories, never the
     # submodules. Replace both with the pinned trees. This runs in the source
@@ -133,8 +140,8 @@ in
     # binary. A build flag is not otherwise observable from the outside.
     passthru.vulkanSupport = vulkanSupport;
 
-    # The sidecar patch is fork-local, so it needs a behavioural test: the
-    # synthetic .breeze files mean this compiles the server sources but never
+    # The fork-local patches are applied in sequence by this test: the
+    # synthetic .breeze files mean it compiles the server sources but never
     # loads a model. It covers the precedence the module promises (request >
     # voice sidecar > GenRequest default) and the 404 for an unknown voice.
     passthru.tests.voiceDefaults =
@@ -146,6 +153,7 @@ in
           chmod -R u+w $out
           cd $out
           patch -p1 < ${./voice-defaults.patch}
+          patch -p1 < ${./idle-unload.patch}
         '';
       in
       pkgs.runCommand "breeze-tts-voice-defaults-test" {

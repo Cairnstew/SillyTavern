@@ -2770,6 +2770,16 @@ rec {
       cfg = system.config.services.llama-cpp-nixos;
       ini = cfg.internal.modelsPreset;
       unit = system.config.systemd.services.llama-cpp-nixos;
+      idleDisabled = evalLlama pkgs {
+        services.llama-cpp-nixos = {
+          enable = true;
+          router.idleUnloadSeconds = null;
+          models."m" = {
+            weights.path = plainWeights;
+            primary = true;
+          };
+        };
+      };
     in
     assert lib.hasInfix "version = 1" ini;
     assert lib.hasInfix "[*]" ini;
@@ -2795,9 +2805,16 @@ rec {
     assert unit.serviceConfig.StateDirectory == "llama-cpp";
     assert unit.serviceConfig.User == "llama-cpp";
     assert unit.serviceConfig.LoadCredential == "api-key:${toString apiKey}";
+    # The idle flag is a router CLI argument, not an INI key: the pinned
+    # llama.cpp has no LLAMA_ARG_SLEEP_IDLE_SECONDS mapping.
+    assert cfg.internal.serverArgs == [
+      "--sleep-idle-seconds"
+      "900"
+    ];
+    assert idleDisabled.config.services.llama-cpp-nixos.internal.serverArgs == [ ];
     pkgs.runCommand "sillytavern-check-llama-preset" { }
       ''
-        echo "PASS llama-preset (sections, context, eager primary, credential)"
+        echo "PASS llama-preset (sections, context, eager primary, idle sleep, credential)"
         touch "$out"
       '';
 
@@ -2844,15 +2861,23 @@ rec {
     assert count (base // { models."m" = model { weights = { }; }; }) == 1;
     # A reserved key in `args`.
     assert count (base // { models."m" = model { args = { c = 4096; }; }; }) == 1;
+    # The idle timeout is reserved too; the first-class option owns it.
+    assert count (
+      base // { models."m" = model { args = { sleep-idle-seconds = 600; }; }; }
+    ) == 1;
     # `model` in the global section.
     assert count (base // { globalArgs = { model = "/var/lib/llama/m.gguf"; }; }) == 1;
+    # `globalArgs` cannot also own the idle timeout.
+    assert count (base // { globalArgs = { sleep-idle-seconds = 600; }; }) == 1;
+    # An upgrade from the old INI-only workaround with the same value is fine.
+    assert count (base // { globalArgs = { sleep-idle-seconds = 900; }; }) == 0;
     # An id that would break the INI structure.
     assert count (
       base // { models = { "bad]id" = model { }; "m" = model { primary = false; }; }; }
     ) == 1;
     pkgs.runCommand "sillytavern-check-llama-assertions" { }
       ''
-        echo "PASS llama-assertions (primary, weights, reserved keys, section names)"
+        echo "PASS llama-assertions (primary, weights, reserved keys, idle timeout, section names)"
         touch "$out"
       '';
 
@@ -3244,6 +3269,20 @@ rec {
       };
       cfg = system.config.services.breeze-tts-nixos;
       unit = system.config.systemd.services.breeze-tts-nixos;
+      idleDisabled = evalTts pkgs {
+        services.breeze-tts-nixos = {
+          enable = true;
+          model = "q4_k";
+          idleUnloadSeconds = null;
+        };
+      };
+      cpuNoGuard = evalTts pkgs {
+        services.breeze-tts-nixos = {
+          enable = true;
+          model = "q4_k";
+          backend = "cpu";
+        };
+      };
     in
     # The static budget and the runtime need are different numbers.
     assert cfg.internal.requiredVramMiB == 3072;
@@ -3269,6 +3308,16 @@ rec {
     assert lib.hasInfix "--chunk-max 40" unit.serviceConfig.ExecStart;
     assert lib.hasInfix "--split-chars 300" unit.serviceConfig.ExecStart;
     assert lib.hasInfix "--voices-dir /var/lib/breeze-tts/voices" unit.serviceConfig.ExecStart;
+    assert lib.hasInfix "--idle-unload-seconds 900" unit.serviceConfig.ExecStart;
+    # The idle-unload flag is rendered from the first-class option, and the
+    # Vulkan reload is guarded by the same free-VRAM script as startup.
+    assert lib.elem "--idle-unload-seconds" cfg.internal.serverArgs;
+    assert lib.elem "900" cfg.internal.serverArgs;
+    assert lib.elem "--reload-guard" cfg.internal.serverArgs;
+    assert lib.elem cfg.internal.vramGuardScript cfg.internal.serverArgs;
+    assert !(lib.elem "--idle-unload-seconds" idleDisabled.config.services.breeze-tts-nixos.internal.serverArgs);
+    assert !(lib.elem "--reload-guard" idleDisabled.config.services.breeze-tts-nixos.internal.serverArgs);
+    assert !(lib.elem "--reload-guard" cpuNoGuard.config.services.breeze-tts-nixos.internal.serverArgs);
     # voices installer + model check + VRAM guard, in that order.
     assert builtins.length unit.serviceConfig.ExecStartPre == 3;
     assert builtins.elem (toString cfg.internal.voicesScript) (map toString unit.serviceConfig.ExecStartPre);
@@ -3330,6 +3379,8 @@ rec {
     # extraArgs repeats a flag the module owns, in either spelling.
     assert count (base // { extraArgs = [ "--cpu" ]; }) == 1;
     assert count (base // { extraArgs = [ "--port=9999" ]; }) == 1;
+    assert count (base // { extraArgs = [ "--idle-unload-seconds=60" ]; }) == 1;
+    assert count (base // { extraArgs = [ "--reload-guard=/tmp/no" ]; }) == 1;
     # An absolute StateDirectory.
     assert count (base // { stateDirectory = "/var/lib/breeze"; }) == 1;
     # A voice name that would escape the voices directory.

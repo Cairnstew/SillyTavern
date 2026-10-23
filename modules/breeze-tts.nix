@@ -13,9 +13,10 @@
 #
 # The upstream server has no authentication, no rate limiting and no VRAM
 # ceiling. It loads one model and accepts one generation at a time (a second
-# request gets 409), but the model's footprint is claimed at START and held for
-# the process's lifetime. On a 12 GiB card shared with an 8B LLM, starting the
-# wrong quantization is how the LLM gets OOM-killed later, during an unrelated
+# request gets 409). The model's footprint is claimed while it is resident; by
+# default it is freed after 900 seconds of inactivity and reloaded lazily by
+# the next request. On a 12 GiB card shared with an 8B LLM, starting the wrong
+# quantization is how the LLM gets OOM-killed later, during an unrelated
 # request.
 #
 # Vulkan has no per-process VRAM limit and neither does systemd: `MemoryMax`
@@ -384,6 +385,8 @@
     "--cors"
     "--no-warmup"
     "--verbose"
+    "--idle-unload-seconds"
+    "--reload-guard"
   ];
 
   # Both spellings: `--port 1234` and `--port=1234` reach the server the same
@@ -573,6 +576,14 @@
     ++ optional (cfg.backend == "cpu") "--cpu"
     ++ optional cfg.verbose "--verbose"
     ++ optional cfg.noWarmup "--no-warmup"
+    ++ optional (cfg.idleUnloadSeconds != null) "--idle-unload-seconds"
+    ++ optional (cfg.idleUnloadSeconds != null) (toString cfg.idleUnloadSeconds)
+    ++ optional (
+      cfg.idleUnloadSeconds != null && cfg.backend == "vulkan" && cfg.gpu.checkAtStart
+    ) "--reload-guard"
+    ++ optional (
+      cfg.idleUnloadSeconds != null && cfg.backend == "vulkan" && cfg.gpu.checkAtStart
+    ) (toString vramGuard)
     ++ [
       "--chunk-first"
       (toString cfg.chunkFirst)
@@ -754,7 +765,7 @@
 
     if [ "$gpu_free" -lt "$need" ]; then
       {
-        echo "ERROR: refusing to start breeze-tts: not enough free VRAM."
+        echo "ERROR: refusing breeze-tts: not enough free VRAM."
         echo "  free $gpu_free MiB < required $need MiB"
         echo
         echo "Another process (the LLM) is holding the rest. Unload it, pick a"
@@ -776,7 +787,8 @@ in {
         The Breeze-TTS build to run. The default is the Vulkan build. For a host
         without Vulkan, use
         `pkgs.callPackage ./pkgs/breeze-tts-2 { vulkanSupport = false; }` and
-        set `backend = "cpu"` as well.
+        set `backend = "cpu"` as well. A custom package must include this
+        repository's idle-unload patch when `idleUnloadSeconds` is not `null`.
       '';
     };
 
@@ -937,6 +949,23 @@ in {
       type = types.bool;
       default = false;
       description = "`--no-warmup`: skip the startup generation that builds the GPU pipelines (saves ~2 s, costs ~300 ms on the first request).";
+    };
+
+    idleUnloadSeconds = mkOption {
+      type = types.nullOr types.ints.positive;
+      default = 900;
+      example = 900;
+      description = ''
+        Seconds of inactivity after which the server frees the model and its
+        VRAM. The next request reloads it lazily; that first request pays the
+        model-load and pipeline-setup cost. `null` keeps the model resident for
+        the process lifetime.
+
+        The reload is guarded by the same free-VRAM preflight as startup when
+        `backend = "vulkan"` and `gpu.checkAtStart = true`. A reload that no
+        longer fits (for example because the LLM has taken the memory) returns
+        503 rather than starting the model anyway.
+      '';
     };
 
     corsOrigins = mkOption {

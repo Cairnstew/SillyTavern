@@ -19,6 +19,7 @@
 #   BREEZE_TTS_MODEL   path to a .gguf (required; the script does not download)
 #   BREEZE_TTS_CPU=1   force the CPU backend (slow; skips the Vulkan assertion)
 #   BREEZE_TTS_PORT    HTTP port (default 18137)
+#   BREEZE_TTS_IDLE    idle-unload seconds for the reload check (default 0 = off)
 #
 # Exits non-zero if the server fails to become healthy, returns a non-200, or
 # produces no audio. A real-time factor below 1.0 is reported as a warning, not
@@ -31,6 +32,14 @@ SYSTEM="${ST_SYSTEM:-x86_64-linux}"
 MODEL="${BREEZE_TTS_MODEL:-}"
 PORT="${BREEZE_TTS_PORT:-18137}"
 CPU="${BREEZE_TTS_CPU:-0}"
+IDLE="${BREEZE_TTS_IDLE:-0}"
+
+case "$IDLE" in
+  ''|*[!0-9]*)
+    echo "BREEZE_TTS_IDLE must be a non-negative integer" >&2
+    exit 2
+    ;;
+esac
 
 if [ -z "$MODEL" ]; then
   echo "BREEZE_TTS_MODEL is not set. Point it at a Breeze-TTS-2 GGUF, e.g." >&2
@@ -65,6 +74,9 @@ fi
 ARGS=(--host 127.0.0.1 --port "$PORT")
 if [ "$CPU" = "1" ]; then
   ARGS+=(--cpu)
+fi
+if [ "$IDLE" -gt 0 ]; then
+  ARGS+=(--idle-unload-seconds "$IDLE")
 fi
 
 echo "starting breeze-server on :$PORT ($([ "$CPU" = 1 ] && echo CPU || echo Vulkan))"
@@ -139,6 +151,39 @@ echo "generated ${AUDIO_SECONDS}s of audio in ${ELAPSED}s -> ${RTF}x realtime"
 
 if python3 -c "import sys; sys.exit(0 if $RTF < 1.0 else 1)"; then
   echo "WARNING: slower than realtime on this host; streamed playback will stutter." >&2
+fi
+
+if [ "$IDLE" -gt 0 ]; then
+  WAIT=$((IDLE + 3))
+  echo "waiting ${WAIT}s for the idle unload (idleUnloadSeconds=$IDLE)"
+  sleep "$WAIT"
+  if ! grep -q "unloading model after $IDLE seconds idle" "$TMP/server.log"; then
+    echo "server did not log an idle unload:" >&2
+    tail -20 "$TMP/server.log" >&2
+    exit 1
+  fi
+
+  CODE2="$(
+    curl -sS --max-time 180 -o "$TMP/out2.wav" -w '%{http_code}' \
+      -X POST "http://127.0.0.1:$PORT/v1/audio/speech" \
+      -H 'Content-Type: application/json' \
+      -d '{"model":"tts-1","input":"Reload after idle.","instructions":"A warm, calm narrator.","response_format":"wav"}'
+  )"
+  if [ "$CODE2" != "200" ]; then
+    echo "speech request after idle returned HTTP $CODE2:" >&2
+    cat "$TMP/out2.wav" >&2
+    exit 1
+  fi
+  if ! grep -q "reloading" "$TMP/server.log"; then
+    echo "server did not log a lazy reload:" >&2
+    tail -20 "$TMP/server.log" >&2
+    exit 1
+  fi
+  if [ ! -s "$TMP/out2.wav" ]; then
+    echo "speech request after idle produced no audio" >&2
+    exit 1
+  fi
+  echo "PASS idle-unload (unloaded after $IDLE s, reloaded on request)"
 fi
 
 grep -E "frames in|first audio" "$TMP/server.log" | tail -2 || true

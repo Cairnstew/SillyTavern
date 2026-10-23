@@ -244,6 +244,7 @@ let
     "c"
     "ctx-size"
     "load-on-startup"
+    "sleep-idle-seconds"
   ];
 
   effectiveLoadOnStartup = m: if m.loadOnStartup != null then m.loadOnStartup else m.primary;
@@ -270,6 +271,16 @@ let
 
   cacheDir = "/var/lib/${cfg.stateDirectory}/cache";
 
+  # `--sleep-idle-seconds` is a CLI flag on `llama serve`, not a key with a
+  # `LLAMA_ARG_*` environment mapping in the pinned llama.cpp. The router
+  # merges its own CLI arguments into every child model preset, so one flag
+  # covers every model the router may load.
+  serverArgs =
+    lib.optionals (cfg.router.idleUnloadSeconds != null) [
+      "--sleep-idle-seconds"
+      (toString cfg.router.idleUnloadSeconds)
+    ];
+
   # The API key is a credential: it must not appear in the unit file or in the
   # Nix store. `LoadCredential` puts it in a 0700 directory for this unit only,
   # and the wrapper copies it into the environment form llama.cpp reads.
@@ -286,7 +297,7 @@ let
         LLAMA_ARG_API_KEY="$(cat "''${CREDENTIALS_DIRECTORY}/api-key")"
         export LLAMA_ARG_API_KEY
       fi
-      exec ${lib.getExe' cfg.package "llama"} serve
+      exec ${lib.getExe' cfg.package "llama"} serve ${lib.escapeShellArgs serverArgs}
     '';
   };
 
@@ -317,6 +328,15 @@ let
   ) modelIds;
 
   badSections = builtins.filter (id: !(llama.validSection id)) modelIds;
+
+  # `globalArgs` is an escape hatch for INI keys that have no first-class
+  # option. `sleep-idle-seconds` does have one now; setting both would render
+  # the same option twice (the CLI copy wins), which looks like it did
+  # something different from what the INI says.
+  badGlobalIdle =
+    cfg.router.idleUnloadSeconds != null
+    && builtins.hasAttr "sleep-idle-seconds" cfg.globalArgs
+    && toString cfg.globalArgs."sleep-idle-seconds" != toString cfg.router.idleUnloadSeconds;
 in
 {
   options.services.llama-cpp-nixos = {
@@ -329,7 +349,9 @@ in
       description = ''
         The llama.cpp build to run. Use `pkgs.llama-cpp-cuda`,
         `pkgs.llama-cpp-rocm` or `pkgs.llama-cpp-vulkan` for acceleration;
-        the plain package has runtime CPU dispatch.
+        the plain package has runtime CPU dispatch. It must support
+        `--sleep-idle-seconds` (llama.cpp 0.6.0 and later) when
+        `router.idleUnloadSeconds` is not `null`.
       '';
     };
 
@@ -398,6 +420,19 @@ in
           Let the router load a requested model automatically. With `false`,
           only the primary model is available until something else asks for a
           load.
+        '';
+      };
+      idleUnloadSeconds = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = 900;
+        example = 900;
+        description = ''
+          Seconds of inactivity after which a loaded model is put to sleep.
+          llama.cpp drops the model weights and KV cache; the next inference
+          request reloads them automatically. `null` disables idle sleeping.
+
+          The provider endpoints (`/health`, `/props`, `/models`, `/metrics`)
+          do not count as activity. Only inference does.
         '';
       };
     };
@@ -526,12 +561,25 @@ in
         message = ''
           services.llama-cpp-nixos: a model's `args` sets a reserved key.
 
-          `model`, `c`/`ctx-size` and `load-on-startup` are derived from
-          `weights`, `ctxSize` and `primary`/`loadOnStartup`. Declaring them in
-          `args` would give one value two sources, so they are refused rather
-          than silently dropped.
+          `model`, `c`/`ctx-size`, `load-on-startup` and
+          `sleep-idle-seconds` are derived from `weights`, `ctxSize`,
+          `primary`/`loadOnStartup` and `router.idleUnloadSeconds`. Declaring
+          them in `args` would give one value two sources, so they are refused
+          rather than silently dropped.
 
           Offending models: ${lib.concatStringsSep ", " reservedInArgs}
+        '';
+      }
+      {
+        assertion = !badGlobalIdle;
+        message = ''
+          services.llama-cpp-nixos: `globalArgs` and
+          `router.idleUnloadSeconds` set `sleep-idle-seconds` to different
+          values.
+
+          Pick one. `router.idleUnloadSeconds` is the supported option; the
+          INI key is only an escape hatch when the option is `null`. The same
+          value in both places is accepted for compatibility.
         '';
       }
       {
@@ -641,6 +689,7 @@ in
       presetFile = toString presetFile;
       modelIds = modelIds;
       cacheDir = cacheDir;
+      serverArgs = serverArgs;
     };
   };
 }

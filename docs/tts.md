@@ -138,6 +138,31 @@ There is **no** total-request time limit. A client can send an enormous text and
 keep the server busy for as long as the text implies. Put a reverse proxy in
 front if that matters, and keep `host` on loopback.
 
+### 2e. Idle unload and the guard
+
+`idleUnloadSeconds` defaults to `900`. After that much inactivity the server
+frees the model and its VRAM. The next request reloads it lazily: the model load
+and first-generation pipeline setup are paid then, not at startup. `null` keeps
+the model resident for the process lifetime.
+
+Unloading only runs when no generation or voice encoding holds the device
+lock, and activity at the end of a request resets the timer, so a long stream
+cannot be unloaded underneath itself. Activity on a WebSocket session also
+resets it.
+
+This interacts with the runtime guard. On startup the guard is an
+`ExecStartPre`; a reload happens inside the running server and cannot re-run
+systemd's pre-start list. When `backend = "vulkan"` and
+`gpu.checkAtStart = true`, the module therefore passes the same generated guard
+to the server as `--reload-guard`. A reload that does not fit (for example
+because the LLM has taken the VRAM) returns `503` and leaves the model unloaded.
+The next request retries the guard. With `gpu.checkAtStart = false` or
+`backend = "cpu"` no reload guard is passed, so the static budget is the only
+protection.
+
+Because reload is lazy, `noWarmup` only affects the initial startup. There is no
+warm-up after an idle reload; the first real request pays that cost.
+
 ---
 
 ## 3. Wiring SillyTavern to it — automatic
@@ -383,7 +408,9 @@ only when reproducibility outweighs store size.
   device, the guard and the model disagree.
 - **Warm-up matters.** The default warm-up costs ~11 s of startup cold and takes
   first audio from ~17 s to ~190 ms. `noWarmup = true` moves that cost into the
-  first request instead.
+  first request instead. An idle reload is lazy: it reloads the model but does
+  not re-run the warm-up, so the first request after `idleUnloadSeconds` pays
+  the pipeline setup again.
 - **Cloning quality is average.** Upstream's blind-test ranking comes from its
   stock/designed voices; controlled voice-cloning scores are a three-way tie with
   Voxtral TTS and Fish S2 Pro. Voxtral is the better pure cloner but needs 16 GB.
@@ -401,13 +428,16 @@ only when reproducibility outweighs store size.
 ## 6. Testing it
 
 ```bash
-just tts-test        # the six evaluation checks (no GPU needed)
+just tts-test        # the evaluation checks (no GPU needed)
 just tts-build       # build the Vulkan package
 BREEZE_TTS_MODEL=/var/lib/breeze-tts/models/breeze-tts-2-q4_k.gguf just tts-live
+# also verify the idle unload + lazy reload path:
+BREEZE_TTS_IDLE=2 BREEZE_TTS_MODEL=... just tts-live
 ```
 
 `just tts-live` runs `nix-tests/live/test_tts_server.sh`, which starts the real
 server against a real model, asserts `/health`, generates a short clip over the
-OpenAI-compatible endpoint, and reports the measured real-time factor. It is
-opt-in because it needs a GPU and the weights; it is not part of
-`nix flake check`.
+OpenAI-compatible endpoint, and reports the measured real-time factor. With
+`BREEZE_TTS_IDLE` set it also waits for the unload log line, requests speech
+again, and requires a successful lazy reload. It is opt-in because it needs a
+GPU and the weights; it is not part of `nix flake check`.
