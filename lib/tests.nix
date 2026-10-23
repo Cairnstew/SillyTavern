@@ -3222,6 +3222,14 @@ rec {
         touch "$out"
       '';
 
+  # The sidecar patch is fork-local, so run its behavioural test: synthetic
+  # .breeze files, no model, precedence and the unknown-voice 404. It compiles
+  # the patched server sources rather than trusting that the patch still
+  # applies and still does what the module promises.
+  breezeTtsVoiceDefaults =
+    pkgs:
+    (pkgs.callPackage ../pkgs/breeze-tts-2 { vulkanSupport = false; }).passthru.tests.voiceDefaults;
+
   breezeTtsUnit =
     pkgs:
     let
@@ -3331,6 +3339,26 @@ rec {
         voices."../escape".source = pkgs.writeText "escape.breeze" "BRZV";
       }
     ) == 1;
+    # CFG below 1.0 guides away from the conditioned output.
+    assert count (
+      base
+      // {
+        voices.Widowmaker = {
+          source = pkgs.writeText "w.breeze" "BRZV";
+          generation.cfgScale = 0.5;
+        };
+      }
+    ) == 1;
+    # Top-p is a probability.
+    assert count (
+      base
+      // {
+        voices.Widowmaker = {
+          source = pkgs.writeText "w.breeze" "BRZV";
+          generation.topP = 1.5;
+        };
+      }
+    ) == 1;
     pkgs.runCommand "sillytavern-check-breeze-tts-assertions" { }
       ''
         echo "PASS breeze-tts-assertions (weights, budget, backend, args)"
@@ -3404,7 +3432,14 @@ rec {
           enable = true;
           model = "q4_k";
           voices = {
-            Widowmaker.source = voiceFile;
+            Widowmaker = {
+              source = voiceFile;
+              generation = {
+                instruction = "Speak coldly.";
+                cfgScale = 2.0;
+                seed = 7;
+              };
+            };
             Ana.source = pack;
           };
         };
@@ -3418,11 +3453,22 @@ rec {
       "Ana"
       "Widowmaker"
     ];
+    assert cfg.internal.voiceDefaultValues.Widowmaker == {
+      instructions = "Speak coldly.";
+      cfg_scale = 2.0;
+      seed = 7;
+    };
+    assert cfg.internal.voiceDefaultValues.Ana == { };
+    assert builtins.attrNames cfg.internal.voiceDefaultSources == [ "Widowmaker" ];
     assert builtins.elem (toString cfg.internal.voicesScript) (map toString unit.serviceConfig.ExecStartPre);
     assert lib.hasInfix "install_voice Widowmaker " text;
     assert lib.hasInfix "install_voice Ana " text;
+    assert lib.hasInfix "install_defaults Widowmaker " text;
     assert lib.hasInfix (builtins.unsafeDiscardStringContext (toString voiceFile)) text;
     assert lib.hasInfix (builtins.unsafeDiscardStringContext (toString pack)) text;
+    assert lib.hasInfix (
+      builtins.unsafeDiscardStringContext (toString cfg.internal.voiceDefaultSources.Widowmaker)
+    ) text;
     assert lib.hasInfix "magic != BRZV" text;
     pkgs.runCommand "sillytavern-check-breeze-tts-voices" { }
       ''
@@ -3457,7 +3503,13 @@ rec {
           };
         }).config.services.breeze-tts-nixos.internal;
       two = mkInternal {
-        Widowmaker.source = good;
+        Widowmaker = {
+          source = good;
+          generation = {
+            cfgScale = 2.0;
+            seed = 7;
+          };
+        };
         Ana.source = single;
       };
       one = mkInternal { Ana.source = single; };
@@ -3467,20 +3519,35 @@ rec {
     pkgs.runCommand "sillytavern-check-breeze-tts-voices-install" { } ''
       dir="$PWD/voices"
       mkdir -p "$dir"
-      # A runtime-created voice, outside the module's manifest.
+      # Runtime-created voices/defaults, outside the module's manifest.
       cp ${good} "$dir/Runtime.breeze"
+      printf '%s' '{"seed":99}' > "$dir/Runtime.json"
+
+      # A manifest from the first version recorded bare voice names. The
+      # upgrade must keep a name that is still declared and remove one that is
+      # gone, without deleting the file the current install step writes.
+      cp ${good} "$dir/OldVoice.breeze"
+      printf '%s\n' 'Widowmaker' 'OldVoice' > "$dir/.nix-managed"
 
       ${two.voicesScript} "$dir"
       test -f "$dir/Widowmaker.breeze"
       test -f "$dir/Ana.breeze"
+      test -f "$dir/Widowmaker.json"
+      test ! -e "$dir/OldVoice.breeze"
       test "$(cat "$dir/Ana.breeze")" = "BRZVsingle"
+      ${pkgs.gnugrep}/bin/grep -q '"cfg_scale":2' "$dir/Widowmaker.json"
+      ${pkgs.gnugrep}/bin/grep -q '"seed":7' "$dir/Widowmaker.json"
       test -f "$dir/Runtime.breeze"
+      test -f "$dir/Runtime.json"
 
-      # A second generation removes the dropped managed voice and nothing else.
+      # A second generation removes the dropped managed voice and its sidecar,
+      # and nothing else.
       ${one.voicesScript} "$dir"
       test ! -e "$dir/Widowmaker.breeze"
+      test ! -e "$dir/Widowmaker.json"
       test -f "$dir/Ana.breeze"
       test -f "$dir/Runtime.breeze"
+      test -f "$dir/Runtime.json"
 
       if ${badVoice.voicesScript} "$dir" 2>bad.err; then
         echo "installer accepted a source without the BRZV magic"
@@ -3685,6 +3752,7 @@ rec {
       # The speech backend and its package are Linux-only (Vulkan + AVX2).
       breezeTtsCatalog = breezeTtsCatalog pkgs;
       breezeTtsPackage = breezeTtsPackage pkgs;
+      breezeTtsVoiceDefaults = breezeTtsVoiceDefaults pkgs;
       breezeTtsUnit = breezeTtsUnit pkgs;
       breezeTtsAssertions = breezeTtsAssertions pkgs;
       breezeTtsVramGuard = breezeTtsVramGuard pkgs;

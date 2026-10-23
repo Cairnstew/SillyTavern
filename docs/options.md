@@ -643,8 +643,10 @@ services.breeze-tts-nixos.voices.Widowmaker.source =
 
 The attribute name is the voice id; the file is validated (`BRZV`) and copied
 into `/var/lib/<stateDirectory>/voices/`, and declared names are added to
-SillyTavern's TTS dropdown automatically. `tts.md` §3a covers install, removal
-and the model-family caveat.
+SillyTavern's TTS dropdown automatically. A `generation` block next to `source`
+is written as `<name>.json` and supplies per-voice instruction/cfg/seed/sampling
+defaults; explicit request fields still win. `tts.md` §3a covers install,
+removal, precedence and the model-family caveat.
 
 Two things to know before reaching for it:
 

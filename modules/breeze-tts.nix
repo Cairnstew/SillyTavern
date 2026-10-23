@@ -230,6 +230,84 @@
     };
   };
 
+  voiceGenerationType = types.submodule {
+    options = {
+      instruction = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "Speak in a cold, aristocratic French accent. Slow, dry, contemptuous.";
+        description = ''
+          `instructions` in the OpenAI JSON body (the form API calls it
+          `instruction`): delivery direction for this voice. null uses the
+          server default, `Speak clearly and naturally.`
+
+          For a cloned voice the reference still dominates timbre; this changes
+          pace, energy and delivery, not identity.
+        '';
+      };
+      cfgScale = mkOption {
+        type = types.nullOr types.float;
+        default = null;
+        example = 1.5;
+        description = ''
+          `cfg_scale`. `1.0` disables classifier-free guidance; higher follows
+          the instruction/reference more strongly and costs real-time factor.
+          null leaves the server default of `1.0`.
+        '';
+      };
+      seed = mkOption {
+        type = types.nullOr types.ints.unsigned;
+        default = null;
+        example = 42;
+        description = ''
+          `seed`. The server default is `42`, and there is no "random" sentinel:
+          a declared seed makes identical text produce identical audio (each
+          split piece uses `seed + piece`). null leaves 42 in place.
+        '';
+      };
+      temperature = mkOption {
+        type = types.nullOr types.float;
+        default = null;
+        example = 0.9;
+        description = "`temperature`. null or `0` keeps the GGUF default.";
+      };
+      topK = mkOption {
+        type = types.nullOr types.ints.unsigned;
+        default = null;
+        example = 50;
+        description = "`top_k`. null or `0` keeps the GGUF default.";
+      };
+      topP = mkOption {
+        type = types.nullOr types.float;
+        default = null;
+        example = 1.0;
+        description = "`top_p`, 0–1. null or `0` keeps the GGUF default.";
+      };
+      repetitionPenalty = mkOption {
+        type = types.nullOr types.float;
+        default = null;
+        example = 1.1;
+        description = "`repetition_penalty`. null or `0` keeps the GGUF default.";
+      };
+      maxNewTokens = mkOption {
+        type = types.nullOr types.ints.unsigned;
+        default = null;
+        example = 750;
+        description = "Frame cap per piece, 12.5 frames per second. null or `0` uses the model default of 750.";
+      };
+      splitChars = mkOption {
+        type = types.nullOr types.ints.unsigned;
+        default = null;
+        example = 300;
+        description = ''
+          Long text is split into pieces of about this many characters. null
+          leaves the server's `splitChars` (300 here); `0` disables splitting.
+          This is chunking, not voice identity.
+        '';
+      };
+    };
+  };
+
   modelIds = builtins.attrNames modelCatalog;
 
   # null when a custom GGUF is used. Defaults and assertions branch on this.
@@ -343,11 +421,35 @@
   # /v1/voices with a name) is left alone.
   voiceNames = lib.attrNames cfg.voices;
 
+  # Only fields the operator set. `null` and an empty instruction mean "omit",
+  # so the sidecar stays the minimal contract.
+  voiceGeneration = voice:
+    lib.filterAttrs (_: value: value != null && value != "") {
+      instructions = voice.generation.instruction;
+      cfg_scale = voice.generation.cfgScale;
+      seed = voice.generation.seed;
+      temperature = voice.generation.temperature;
+      top_k = voice.generation.topK;
+      top_p = voice.generation.topP;
+      repetition_penalty = voice.generation.repetitionPenalty;
+      max_new_tokens = voice.generation.maxNewTokens;
+      split_chars = voice.generation.splitChars;
+    };
+
+  voiceDefaultValues = lib.mapAttrs (_: voice: voiceGeneration voice) cfg.voices;
+  voiceDefaultSources = lib.mapAttrs' (
+    name: value: lib.nameValuePair name (pkgs.writeText "${name}.json" (builtins.toJSON value))
+  ) (lib.filterAttrs (_: value: value != { }) voiceDefaultValues);
+
   voiceInstalls = lib.concatStringsSep "\n" (
     lib.mapAttrsToList (
       name: voice:
       "install_voice ${lib.escapeShellArg name} ${lib.escapeShellArg (toString voice.source)}"
     ) cfg.voices
+    ++ lib.mapAttrsToList (
+      name: source:
+      "install_defaults ${lib.escapeShellArg name} ${lib.escapeShellArg (toString source)}"
+    ) voiceDefaultSources
   );
 
   voicesScriptText = ''
@@ -394,24 +496,54 @@
       [ "$(${pkgs.coreutils}/bin/head -c 4 "$src")" = "BRZV" ] \
         || die "voice '$name': '$src' is not a .breeze file (magic != BRZV)"
 
-      wanted["$name"]=1
+      wanted["$name.breeze"]=1
 
       ${pkgs.coreutils}/bin/install -m 0640 "$src" "$dst.tmp"
       ${pkgs.coreutils}/bin/mv -f "$dst.tmp" "$dst"
       echo "breeze-tts: installed voice '$name' from '$src'"
     }
 
+    install_defaults() {
+      local name="$1"
+      local src="$2"
+      local dst="$dir/$name.json"
+
+      [ -s "$src" ] || die "voice '$name': the generation defaults file is empty"
+      wanted["$name.json"]=1
+
+      ${pkgs.coreutils}/bin/install -m 0640 "$src" "$dst.tmp"
+      ${pkgs.coreutils}/bin/mv -f "$dst.tmp" "$dst"
+      echo "breeze-tts: installed generation defaults for '$name'"
+    }
+
     ${voiceInstalls}
 
     # Remove only files this module installed in a previous generation. A voice
     # created at runtime is not in the manifest and is deliberately untouched.
+    # Entries without a suffix are from the name-only manifest the first version
+    # wrote; treat them as their `.breeze` so an upgrade can still clean up.
     if [ -f "$managed" ]; then
       while IFS= read -r old; do
         [ -n "$old" ] || continue
-        if [ -z "''${wanted[$old]+x}" ]; then
-          ${pkgs.coreutils}/bin/rm -f "$dir/$old.breeze"
-          echo "breeze-tts: removed managed voice '$old'"
-        fi
+        case "$old" in
+          *.*)
+            # manifest entries are filenames: <name>.breeze, <name>.json
+            if [ -z "''${wanted[$old]+x}" ]; then
+              ${pkgs.coreutils}/bin/rm -f "$dir/$old"
+              echo "breeze-tts: removed managed file '$old'"
+            fi
+            ;;
+          *)
+            # The first version recorded bare voice names. Normalise before the
+            # lookup, otherwise an upgrade deletes the .breeze the install step
+            # just wrote.
+            legacy="$old.breeze"
+            if [ -z "''${wanted[$legacy]+x}" ]; then
+              ${pkgs.coreutils}/bin/rm -f "$dir/$legacy"
+              echo "breeze-tts: removed managed voice '$old'"
+            fi
+            ;;
+        esac
       done < "$managed"
     fi
 
@@ -842,14 +974,35 @@ in {
 
     voices = mkOption {
       type = types.attrsOf (types.submodule {
-        options.source = mkOption {
-          type = types.path;
-          description = ''
-            A pre-encoded `.breeze` voice file, or a directory containing it. A
-            Nix package output is a directory, so both forms are accepted: when
-            it is a directory, `<name>.breeze` is preferred and otherwise
-            exactly one `*.breeze` is required.
-          '';
+        options = {
+          source = mkOption {
+            type = types.path;
+            description = ''
+              A pre-encoded `.breeze` voice file, or a directory containing it. A
+              Nix package output is a directory, so both forms are accepted: when
+              it is a directory, `<name>.breeze` is preferred and otherwise
+              exactly one `*.breeze` is required.
+            '';
+          };
+          generation = mkOption {
+            type = voiceGenerationType;
+            default = { };
+            description = ''
+              Per-voice generation defaults, written as `<name>.json` next to
+              the voice. The server applies them when a request selects the
+              voice and does not set the field itself; an explicit request value
+              always wins.
+
+              `null` means omit: the server/GGUF default applies. For the
+              sampling fields, `0` also means "model default", so `null` and `0`
+              are equivalent there. `seed` has no random sentinel — the server
+              default is a fixed 42 — so a declared seed makes identical text
+              produce identical audio.
+
+              This is a fork-local sidecar until upstream Breeze reads it. A
+              `package` override that replaces the patched build ignores it.
+            '';
+          };
         };
       });
       default = { };
@@ -1033,7 +1186,38 @@ in {
         voice id the server reports. Use 1–64 letters, digits, dash or
         underscore; anything else could name a file outside the directory.
       '';
-    }) cfg.voices;
+    }) cfg.voices
+    ++ lib.concatLists (lib.mapAttrsToList (name: voice: [
+      {
+        assertion = voice.generation.cfgScale == null || voice.generation.cfgScale >= 1.0;
+        message = ''
+          services.breeze-tts-nixos: voices.${name}.generation.cfgScale must be
+          at least 1.0. Values below 1.0 extrapolate away from the conditioned
+          output rather than towards it; the upstream UI enforces 1–10.
+        '';
+      }
+      {
+        assertion = voice.generation.topP == null
+          || (voice.generation.topP >= 0.0 && voice.generation.topP <= 1.0);
+        message = "services.breeze-tts-nixos: voices.${name}.generation.topP must be between 0 and 1.";
+      }
+      {
+        assertion = voice.generation.temperature == null || voice.generation.temperature >= 0.0;
+        message = "services.breeze-tts-nixos: voices.${name}.generation.temperature must not be negative.";
+      }
+      {
+        assertion = voice.generation.repetitionPenalty == null
+          || voice.generation.repetitionPenalty >= 0.0;
+        message = "services.breeze-tts-nixos: voices.${name}.generation.repetitionPenalty must not be negative.";
+      }
+      {
+        assertion = voice.generation.instruction == null || voice.generation.instruction != "";
+        message = ''
+          services.breeze-tts-nixos: voices.${name}.generation.instruction is
+          empty. Use null to keep the server default, or a non-empty direction.
+        '';
+      }
+    ]) cfg.voices);
 
     warnings =
       [
@@ -1167,6 +1351,8 @@ in {
         reservedInExtraArgs
         resolvedWeights
         serverArgs
+        voiceDefaultSources
+        voiceDefaultValues
         voiceNames
         voicesScript
         voicesScriptText

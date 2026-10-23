@@ -1,0 +1,281 @@
+--- a/apps/server/voices.h
++++ b/apps/server/voices.h
+@@ -7,6 +7,7 @@
+ 
+ #include <map>
+ #include <mutex>
++#include <optional>
+ #include <string>
+ #include <vector>
+ 
+@@ -22,12 +23,27 @@
+ // hash of the clip bytes and its transcript; the id unnamed reference clips are cached under
+ std::string voice_key(const std::string & wav, const std::string & text);
+ 
++// per-voice generation defaults, read from <name>.json next to <name>.breeze.
++// Every field is optional: absent means "use the request/GenRequest default".
++struct VoiceDefaults {
++    std::optional<std::string> instruction;
++    std::optional<float> cfg_scale;
++    std::optional<int> seed;
++    std::optional<float> temperature;
++    std::optional<int> top_k;
++    std::optional<float> top_p;
++    std::optional<float> repetition_penalty;
++    std::optional<int> max_new_tokens;
++    std::optional<int> split_chars;
++};
++
+ struct CachedVoice {
+     std::vector<int> codes;
+     int frames = 0;
+     std::string text;
+     std::string description;
+     std::map<std::string, std::string> meta;
++    VoiceDefaults defaults;
+     double encode_ms = 0;
+     bool saved = false; // has a .breeze file behind it, so it survives a restart
+ };
+@@ -38,7 +54,8 @@
+     void load_dir(const std::string & dir, int n_codebooks);
+ 
+     // fills in a cached reference, false only when the id is unknown
+-    bool take(const std::string & id, std::vector<int> & codes, int & frames, std::string & text);
++    bool take(const std::string & id, std::vector<int> & codes, int & frames, std::string & text,
++              VoiceDefaults * defaults = nullptr);
+ 
+     // in memory insert, unnamed entries get evicted oldest first when the table is full
+     void put(const std::string & id, CachedVoice v);
+--- a/apps/server/voices.cpp
++++ b/apps/server/voices.cpp
+@@ -118,6 +118,82 @@
+     return "";
+ }
+ 
++static void read_num(const JVal & root, const char * key, std::optional<double> & out,
++                     const std::string & path) {
++    const auto it = root.obj.find(key);
++    if (it == root.obj.end() || it->second.kind == JVal::Null) return;
++    if (it->second.kind == JVal::Num) {
++        out = it->second.num;
++        return;
++    }
++    if (it->second.kind == JVal::Str) {
++        char * end = nullptr;
++        const double d = strtod(it->second.str.c_str(), &end);
++        if (end != it->second.str.c_str() && *end == '\0') {
++            out = d;
++            return;
++        }
++    }
++    fprintf(stderr, "%s: %s must be a number, ignoring it\n", path.c_str(), key);
++}
++
++// <name>.json next to <name>.breeze. A malformed or missing file is not fatal: the
++// voice still loads with the request/GenRequest defaults.
++static VoiceDefaults load_defaults(const std::string & path) {
++    VoiceDefaults d;
++    FILE * f = fopen(path.c_str(), "rb");
++    if (!f) return d;
++    std::string body;
++    char buf[4096];
++    size_t n = 0;
++    while ((n = fread(buf, 1, sizeof buf, f)) > 0) body.append(buf, n);
++    const bool read_ok = ferror(f) == 0;
++    fclose(f);
++    if (!read_ok) {
++        fprintf(stderr, "%s: read failed, ignoring generation defaults\n", path.c_str());
++        return d;
++    }
++
++    JVal root;
++    if (!JParser(body).parse(root) || root.kind != JVal::Obj) {
++        fprintf(stderr, "%s: not a json object, ignoring generation defaults\n", path.c_str());
++        return d;
++    }
++
++    const auto str = [&](const char * key, std::optional<std::string> & out) {
++        const auto it = root.obj.find(key);
++        if (it == root.obj.end() || it->second.kind == JVal::Null) return;
++        if (it->second.kind == JVal::Str) {
++            if (!it->second.str.empty()) out = it->second.str;
++            return;
++        }
++        fprintf(stderr, "%s: %s must be a string, ignoring it\n", path.c_str(), key);
++    };
++    // the json API calls it instructions, the form API calls it instruction. accept both.
++    str("instructions", d.instruction);
++    if (!d.instruction) str("instruction", d.instruction);
++
++    std::optional<double> cfg, seed, temp, top_k, top_p, rep, max_tok, split;
++    read_num(root, "cfg_scale", cfg, path);
++    read_num(root, "seed", seed, path);
++    read_num(root, "temperature", temp, path);
++    read_num(root, "top_k", top_k, path);
++    read_num(root, "top_p", top_p, path);
++    read_num(root, "repetition_penalty", rep, path);
++    read_num(root, "max_new_tokens", max_tok, path);
++    read_num(root, "split_chars", split, path);
++
++    if (cfg) d.cfg_scale = (float) *cfg;
++    if (seed) d.seed = (int) *seed;
++    if (temp) d.temperature = (float) *temp;
++    if (top_k) d.top_k = (int) *top_k;
++    if (top_p) d.top_p = (float) *top_p;
++    if (rep) d.repetition_penalty = (float) *rep;
++    if (max_tok) d.max_new_tokens = (int) *max_tok;
++    if (split) d.split_chars = (int) *split;
++    return d;
++}
++
+ void VoiceStore::load_dir(const std::string & dir, int n_codebooks) {
+     for (Voice & v : load_voice_dir(dir)) {
+         if (v.n_codebooks != n_codebooks) {
+@@ -130,6 +206,7 @@
+         cv.text = v.text;
+         cv.description = v.description;
+         cv.meta = v.meta;
++        cv.defaults = load_defaults(dir + "/" + v.name + ".json");
+         cv.saved = true;
+         m_voices[v.name] = std::move(cv);
+         m_order.push_back(v.name);
+@@ -139,13 +216,14 @@
+ }
+ 
+ bool VoiceStore::take(const std::string & id, std::vector<int> & codes, int & frames,
+-                      std::string & text) {
++                      std::string & text, VoiceDefaults * defaults) {
+     std::lock_guard<std::mutex> vg(m_mutex);
+     auto it = m_voices.find(id);
+     if (it == m_voices.end()) return false;
+     codes = it->second.codes;
+     frames = it->second.frames;
+     if (text.empty()) text = it->second.text;
++    if (defaults) *defaults = it->second.defaults;
+     return true;
+ }
+ 
+--- a/apps/server/openai.cpp
++++ b/apps/server/openai.cpp
+@@ -108,12 +108,25 @@
+     // sillytavern splits its voice list on bare commas, so "a, b" sends " b"
+     const size_t vb = out.voice.find_first_not_of(" \t"), ve = out.voice.find_last_not_of(" \t");
+     out.voice = vb == std::string::npos ? "" : out.voice.substr(vb, ve - vb + 1);
+-    if (!out.voice.empty() && !store.take(out.voice, g.ref_codes, g.ref_frames, g.ref_text)) {
++    VoiceDefaults d;
++    if (!out.voice.empty() && !store.take(out.voice, g.ref_codes, g.ref_frames, g.ref_text, &d)) {
+         status = 404;
+         return "voice '" + out.voice + "' is not a saved voice. register one with POST /v1/voices, "
+                "or leave voice out to design one from instructions";
+     }
+ 
++    // Per-voice defaults from <name>.json. An explicit request field wins; the
++    // numeric parser below starts from these values and only overwrites a field
++    // the body actually contains.
++    if (d.instruction && ins.empty()) g.instruction = *d.instruction;
++    if (d.cfg_scale) g.cfg_scale = *d.cfg_scale;
++    if (d.seed) g.seed = *d.seed;
++    if (d.temperature) g.temperature = *d.temperature;
++    if (d.top_k) g.top_k = *d.top_k;
++    if (d.top_p) g.top_p = *d.top_p;
++    if (d.repetition_penalty) g.repetition_penalty = *d.repetition_penalty;
++    if (d.max_new_tokens) g.max_new_tokens = *d.max_new_tokens;
++
+     if (!str_field(root, "response_format", out.format)) return "response_format must be a string";
+     if (out.format.empty()) out.format = "mp3";
+     static const char * formats[] = { "mp3", "opus", "aac", "flac", "wav", "pcm" };
+@@ -127,8 +140,9 @@
+     else if (!stream.empty() && stream != "audio") return "stream_format must be audio or sse";
+ 
+     // the native knobs ride along as extra fields, model and speed are accepted and ignored
+-    double cfg = g.cfg_scale, seed = g.seed, temp = 0, top_k = 0, top_p = 0, rep = 0, max_tok = 0;
+-    double split = split_chars;
++    double cfg = g.cfg_scale, seed = g.seed, temp = g.temperature, top_k = g.top_k, top_p = g.top_p,
++           rep = g.repetition_penalty, max_tok = g.max_new_tokens;
++    double split = d.split_chars ? (double) *d.split_chars : (double) split_chars;
+     const std::pair<const char *, double *> nums[] = {
+         { "cfg_scale", &cfg }, { "seed", &seed }, { "temperature", &temp }, { "top_k", &top_k },
+         { "top_p", &top_p }, { "repetition_penalty", &rep }, { "max_new_tokens", &max_tok },
+--- a/apps/server/server.cpp
++++ b/apps/server/server.cpp
+@@ -273,11 +273,27 @@
+             }
+         }
+         const std::string vid = field(req, "voice_id", "");
+-        if (!vid.empty() && !store.take(vid, g.ref_codes, g.ref_frames, g.ref_text)) {
++        VoiceDefaults d;
++        if (!vid.empty() && !store.take(vid, g.ref_codes, g.ref_frames, g.ref_text, &d)) {
+             res.status = 404;
+             res.set_content("{\"error\":\"unknown voice_id\"}", "application/json");
+             return;
+         }
++        // Per-voice defaults from <name>.json, but only for fields the form did
++        // not send: the parsed values above then stand.
++        const auto has_field = [&](const char * name) {
++            return req.has_file(name) || req.has_param(name);
++        };
++        if (d.instruction && !has_field("instruction")) g.instruction = *d.instruction;
++        if (d.cfg_scale && !has_field("cfg_scale")) g.cfg_scale = *d.cfg_scale;
++        if (d.seed && !has_field("seed")) g.seed = *d.seed;
++        if (d.temperature && !has_field("temperature")) g.temperature = *d.temperature;
++        if (d.top_k && !has_field("top_k")) g.top_k = *d.top_k;
++        if (d.top_p && !has_field("top_p")) g.top_p = *d.top_p;
++        if (d.repetition_penalty && !has_field("repetition_penalty"))
++            g.repetition_penalty = *d.repetition_penalty;
++        if (d.max_new_tokens && !has_field("max_new_tokens")) g.max_new_tokens = *d.max_new_tokens;
++        if (d.split_chars && !has_field("split_chars")) g.split_chars = *d.split_chars;
+         if (g.text.empty()) {
+             res.status = 400;
+             res.set_content("{\"error\":\"text is required\"}", "application/json");
+--- a/apps/server/ws_api.cpp
++++ b/apps/server/ws_api.cpp
+@@ -51,6 +51,10 @@
+     }
+ }
+ 
++static bool json_has(const std::string & msg, const char * key) {
++    return msg.find("\"" + std::string(key) + "\"") != std::string::npos;
++}
++
+ static std::string esc(const std::string & s) {
+     std::string o;
+     for (char c : s) {
+@@ -183,8 +187,8 @@
+                          MimiCodec & codec, VoiceStore & store, int chunk_first, int chunk_max,
+                          int split_chars) {
+     GenRequest g;
+-    g.instruction = json_str(msg, "instruction");
+-    if (g.instruction.empty()) g.instruction = "Speak clearly and naturally.";
++    const std::string ins = json_str(msg, "instruction");
++    g.instruction = ins.empty() ? "Speak clearly and naturally." : ins;
+     g.ref_text = json_str(msg, "ref_text");
+     g.cfg_scale = (float) json_num(msg, "cfg_scale", 1.0);
+     g.seed = (int) json_num(msg, "seed", 42);
+@@ -194,14 +198,26 @@
+     g.chunk_max = chunk_max;
+ 
+     const std::string vid = json_str(msg, "voice_id");
+-    if (!vid.empty() && !store.take(vid, g.ref_codes, g.ref_frames, g.ref_text)) {
++    VoiceDefaults d;
++    if (!vid.empty() && !store.take(vid, g.ref_codes, g.ref_frames, g.ref_text, &d)) {
+         event(conn, "error", "\"message\":\"unknown voice_id\"");
+         return;
+     }
++    // Per-voice defaults from <name>.json. A field the start message named wins;
++    // instruction is treated as absent when it is empty, matching the http path.
++    if (d.instruction && ins.empty()) g.instruction = *d.instruction;
++    if (d.cfg_scale && !json_has(msg, "cfg_scale")) g.cfg_scale = *d.cfg_scale;
++    if (d.seed && !json_has(msg, "seed")) g.seed = *d.seed;
++    if (d.temperature && !json_has(msg, "temperature")) g.temperature = *d.temperature;
++    if (d.top_k && !json_has(msg, "top_k")) g.top_k = *d.top_k;
++    if (d.top_p) g.top_p = *d.top_p;
++    if (d.repetition_penalty) g.repetition_penalty = *d.repetition_penalty;
++    if (d.max_new_tokens) g.max_new_tokens = *d.max_new_tokens;
+ 
+     std::lock_guard<std::mutex> lock(s.mu);
+     s.instruction = g.instruction;
+     s.budget = (int) json_num(msg, "split_chars", split_chars);
++    if (d.split_chars && !json_has(msg, "split_chars")) s.budget = *d.split_chars;
+     // streaming drains sentence by sentence, so it always needs a real budget to aim at
+     if (s.budget <= 0) s.budget = 600;
+     s.gen.begin(model, codec, g);

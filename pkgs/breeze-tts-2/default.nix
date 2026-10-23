@@ -17,6 +17,7 @@
 # SillyTavern asks for.
 {
   lib,
+  pkgs,
   stdenv,
   fetchFromGitHub,
   cmake,
@@ -31,6 +32,13 @@
   # The application commit this package builds. Bumping it means re-deriving
   # `hash`, and re-checking the two submodule revisions below.
   rev = "2904b9ad126c07363e8a6c9afa08f73e3309075b";
+
+  appSrc = fetchFromGitHub {
+    owner = "HoppouAI";
+    repo = "Breeze-TTS-2.cpp";
+    inherit rev;
+    hash = "sha256-Qt9fNWjHKHzYjlgzdhTpQeETu6LKhLU/8KNxRbSfTmM=";
+  };
 
   ggmlSrc = fetchFromGitHub {
     owner = "ggml-org";
@@ -50,12 +58,13 @@ in
     pname = "breeze-tts-2${lib.optionalString (!vulkanSupport) "-cpu"}";
     version = "0.1.0";
 
-    src = fetchFromGitHub {
-      owner = "HoppouAI";
-      repo = "Breeze-TTS-2.cpp";
-      inherit rev;
-      hash = "sha256-Qt9fNWjHKHzYjlgzdhTpQeETu6LKhLU/8KNxRbSfTmM=";
-    };
+    src = appSrc;
+
+    # Fork-local until upstream reads per-voice generation defaults: a
+    # `<name>.json` next to `<name>.breeze` supplies instruction/cfg/seed/
+    # sampling, and an explicit request field still wins. The module writes the
+    # sidecar; the browser UI and curl get the same defaults from the server.
+    patches = [ ./voice-defaults.patch ];
 
     # The flake source has empty `third_party/*` directories, never the
     # submodules. Replace both with the pinned trees. This runs in the source
@@ -123,6 +132,35 @@ in
     # The module reads this to refuse a Vulkan backend backed by a CPU-only
     # binary. A build flag is not otherwise observable from the outside.
     passthru.vulkanSupport = vulkanSupport;
+
+    # The sidecar patch is fork-local, so it needs a behavioural test: the
+    # synthetic .breeze files mean this compiles the server sources but never
+    # loads a model. It covers the precedence the module promises (request >
+    # voice sidecar > GenRequest default) and the 404 for an unknown voice.
+    passthru.tests.voiceDefaults =
+      let
+        patchedSrc = pkgs.runCommand "breeze-tts-2-source" {
+          nativeBuildInputs = [ pkgs.patch ];
+        } ''
+          cp -a ${appSrc} $out
+          chmod -R u+w $out
+          cd $out
+          patch -p1 < ${./voice-defaults.patch}
+        '';
+      in
+      pkgs.runCommand "breeze-tts-voice-defaults-test" {
+        nativeBuildInputs = [ pkgs.gcc ];
+      } ''
+        cp -a ${patchedSrc} src
+        cp ${./tests/sidecar.cpp} test.cpp
+        g++ -std=c++17 -O1 -ffunction-sections -fdata-sections \
+          -Isrc/apps/server -Isrc/include -Isrc/third_party \
+          -I${ggmlSrc}/include \
+          test.cpp src/apps/server/openai.cpp src/apps/server/voices.cpp src/src/voice.cpp \
+          -Wl,--gc-sections -o test
+        ./test "$PWD/voices"
+        touch $out
+      '';
 
     meta = {
       description = "Breeze-TTS-2.cpp: streaming GGUF text-to-speech server (${

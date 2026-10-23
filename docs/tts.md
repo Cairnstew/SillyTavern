@@ -239,6 +239,49 @@ services.breeze-tts-nixos.voices.Widowmaker.source =
 output is a directory, so the package above works directly; `<name>.breeze` is
 preferred, otherwise the directory must hold exactly one `*.breeze`.
 
+Per-voice generation settings go in `generation`, and are written as
+`<name>.json` next to the blob:
+
+```nix
+services.breeze-tts-nixos.voices.Widowmaker = {
+  source = inputs.overwatch-voice-lines.packages.${pkgs.system}.widowmaker-voice;
+  generation = {
+    instruction = "Speak in a cold, aristocratic French accent. Slow, dry, contemptuous.";
+    cfgScale = 1.5;       # >= 1.0; 1.0 disables guidance
+    seed = 7;             # fixed seed = identical audio for identical text
+    temperature = 0.9;
+    topK = 50;
+    topP = 1.0;
+    repetitionPenalty = 1.1;
+    maxNewTokens = 750;
+    splitChars = 300;
+  };
+};
+```
+
+The server applies the sidecar when a request selects the voice and does not set
+the field itself, so the precedence is **request > voice sidecar > server/GGUF
+default**. That means a client can still override any value per request; the
+sidecar is a default, not a lock.
+
+- `instruction` is the OpenAI JSON field `instructions` (the form API calls it
+  `instruction`): delivery direction. The reference still dominates timbre.
+- `null`/omitted means "leave the default". For `temperature`, `topK`, `topP` and
+  `repetitionPenalty`, `0` also means the GGUF default.
+- `seed` has no "random" sentinel. The server default is a fixed **42**, so a
+  declared seed makes identical text produce identical audio (each split piece
+  uses `seed + piece`). Omit it if you want the server's existing behaviour; set
+  it when reproducing a specific take.
+- `cfgScale` must be at least `1.0`; higher follows the instruction/reference
+  more strongly and costs real-time factor.
+- `maxNewTokens` is a frame cap (12.5 frames per second); `splitChars` is
+  chunking, not voice identity.
+
+This requires the server to read the sidecar. The packaged build carries a
+fork-local patch (`pkgs/breeze-tts-2/voice-defaults.patch`) until upstream does;
+if you override `package` with an unpatched build, the JSON file is inert.
+`breeze-cli` does not read sidecars — it uses its own flags.
+
 To produce one from a WAV and its transcript, encode it once on a machine with
 the model (this is not part of activation):
 

@@ -1,0 +1,4 @@
+# A unified diff represents an empty context line as a single space, so `git
+# diff --check` would flag every patch file as trailing whitespace. The source
+# files themselves are checked normally.
+*.patch -whitespace
