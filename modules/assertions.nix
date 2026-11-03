@@ -181,6 +181,33 @@ let
     if wrong == [ ] then [ ] else [ "${where} (${lib.concatStringsSep ", " wrong})" ]
   );
 
+  # SillyTavern's OpenAI preset schema uses SHORT keys (`temperature`, `top_p`,
+  # `top_k`, ...), while `settings.json` / `oai_settings` use the long
+  # `*_openai` names. `presets.openai` is written verbatim into a preset file,
+  # so a long name is silently ignored by the client: the preset selects, the
+  # backend switches, and every sampler keeps its previous value. Nothing
+  # errors and the UI looks right, which is precisely the failure mode this
+  # file exists to refuse.
+  modelLayerSettingsKeyConflicts =
+    let
+      aliases = {
+        temp_openai = "temperature";
+        top_p_openai = "top_p";
+        top_k_openai = "top_k";
+        min_p_openai = "min_p";
+        top_a_openai = "top_a";
+        freq_pen_openai = "frequency_penalty";
+        pres_pen_openai = "presence_penalty";
+        repetition_penalty_openai = "repetition_penalty";
+      };
+      wrongKeys =
+        body: builtins.filter (key: body ? ${key}) (builtins.attrNames aliases);
+    in
+    modelLayerConflictSites (
+      where: _entry: body:
+      map (key: "${where}.presets.openai.${key} → use ${aliases.${key}}") (wrongKeys body)
+    );
+
   # A generated preset must not land on a path the operator also declared by
   # hand. `st.deepMerge` would let the generated file win silently; this turns
   # that into an evaluation error instead.
@@ -1802,6 +1829,23 @@ in
         An unknown id would generate nothing, because every artifact is derived
         from the catalogue entry (context size, preset name, connection). Add
         the model to `modelLayers.catalog` or fix the spelling.
+      '';
+    }
+    {
+      assertion = modelLayerSettingsKeyConflicts == [ ];
+      message = ''
+        services.sillytavern-nixos: modelLayers: a `presets.openai` layer uses a
+        settings.json key name instead of a preset key name.
+
+        Offending layers:
+        ${lib.concatMapStrings (line: "  - ${line}\n") modelLayerSettingsKeyConflicts}
+
+        A generated OpenAI preset is written verbatim and read by the client with
+        the preset schema, whose sampling keys are short (`temperature`, `top_p`,
+        `top_k`, `min_p`, `top_a`, `frequency_penalty`, `presence_penalty`,
+        `repetition_penalty`). The long `*_openai` names belong to
+        `settings.common.oai_settings`, where they are correct — a preset that
+        uses them is accepted but every sampler silently keeps its old value.
       '';
     }
     {

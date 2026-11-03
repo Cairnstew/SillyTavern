@@ -1,0 +1,9 @@
+.model_layers_status {
+    margin: 4px 0;
+    opacity: 0.8;
+    word-break: break-word;
+}
+
+.model_layers_settings .menu_button {
+    width: fit-content;
+}

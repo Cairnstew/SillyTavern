@@ -2069,7 +2069,7 @@ rec {
               oai_settings = {
                 custom_url = "https://llm.example.com/v1";
                 openai_max_context = 32768;
-                temp_openai = 0.7;
+                temperature = 0.7;
                 stream_openai = true;
               };
               power_user = {
@@ -2914,15 +2914,15 @@ rec {
             model = "m1";
           };
           presets.openai = {
-            temp_openai = 0.5;
-            top_p_openai = 0.9;
+            temperature = 0.5;
+            top_p = 0.9;
           };
         };
         byUser.seanc.models."m1".presets.openai = {
-          temp_openai = 0.7;
+          temperature = 0.7;
         };
         byUser.seanc.models."m1".characters."Aria".presets.openai = {
-          temp_openai = 0.9;
+          temperature = 0.9;
         };
       };
       files = system.config.services.sillytavern-nixos.internal.seedSpecJson.users.seanc.files;
@@ -2932,12 +2932,12 @@ rec {
     # PER MODEL: the catalogue value applies.
     # PER USER: the user's leaf wins, and the sibling it did not restate
     # survives (this is a DEEP merge, not `//`).
-    assert modelPreset.temp_openai == 0.7;
-    assert modelPreset.top_p_openai == 0.9;
+    assert modelPreset.temperature == 0.7;
+    assert modelPreset.top_p == 0.9;
     assert modelPreset.openai_max_context == 16384;
     # PER CHARACTER: the character's leaf wins over the user's.
-    assert charPreset.temp_openai == 0.9;
-    assert charPreset.top_p_openai == 0.9;
+    assert charPreset.temperature == 0.9;
+    assert charPreset.top_p == 0.9;
     assert charPreset.openai_max_context == 16384;
     pkgs.runCommand "sillytavern-check-model-layers-precedence" { }
       ''
@@ -2957,7 +2957,7 @@ rec {
             model = "m1";
           };
           presets = {
-            openai = { temp_openai = 0.5; };
+            openai = { temperature = 0.5; };
             instruct = { input_sequence = "<|user|>"; };
           };
         };
@@ -3014,7 +3014,7 @@ rec {
             url = "http://127.0.0.1:9931/v1";
             model = "m1";
           };
-          presets.openai = { temp_openai = 0.5; };
+          presets.openai = { temperature = 0.5; };
         };
       };
       catalogConflict = base // {
@@ -3128,6 +3128,38 @@ rec {
     pkgs.runCommand "sillytavern-check-model-layers-context-size" { }
       ''
         echo "PASS model-layers-context-size (openai_max_context cannot drift)"
+        touch "$out"
+      '';
+
+  # `presets.openai` is written verbatim and read with the PRESET schema, whose
+  # sampling keys are short (`temperature`, `top_p`, ...). The long `*_openai`
+  # names are correct in `settings.common.oai_settings` and silently ignored in
+  # a preset. The assertion must refuse the wrong namespace and accept the
+  # right one, because the failure mode is a preset that selects a backend but
+  # applies no sampling at all.
+  modelLayersSettingsKeys =
+    pkgs:
+    let
+      base =
+        presets:
+        {
+          enable = true;
+          catalog."m1" = {
+            contextSize = 8192;
+            connection = {
+              url = "http://127.0.0.1:9931/v1";
+              model = "m1";
+            };
+            presets.openai = presets;
+          };
+        };
+    in
+    assert builtins.length (stModelLayerFailures pkgs (base { temperature = 0.5; top_p = 0.9; })) == 0;
+    assert builtins.length (stModelLayerFailures pkgs (base { temp_openai = 0.5; })) >= 1;
+    assert builtins.length (stModelLayerFailures pkgs (base { freq_pen_openai = 0; })) >= 1;
+    pkgs.runCommand "sillytavern-check-model-layers-settings-keys" { }
+      ''
+        echo "PASS model-layers-settings-keys (settings.json names refused in presets)"
         touch "$out"
       '';
 
@@ -3796,6 +3828,7 @@ rec {
       modelLayersCharacterNames = modelLayersCharacterNames pkgs;
       modelLayersContextSize = modelLayersContextSize pkgs;
       modelLayersConnection = modelLayersConnection pkgs;
+      modelLayersSettingsKeys = modelLayersSettingsKeys pkgs;
       modelLayersContextMatchesBackend = modelLayersContextMatchesBackend pkgs;
       llamaCudaVariantAvailable = llamaCudaVariantAvailable pkgs;
     }

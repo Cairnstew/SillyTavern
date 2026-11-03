@@ -699,11 +699,11 @@ services.sillytavern-nixos.modelLayers = {
       url = "http://127.0.0.1:9931/v1";
       model = "gemma-4-e4b";
     };
-    presets.openai = { temp_openai = 0.7; };
+    presets.openai = { temperature = 0.7; };
   };
   byUser.seanc.models."gemma-4-e4b" = {
-    presets.openai.temp_openai = 0.9;
-    characters."Aria".presets.openai.temp_openai = 0.4;
+    presets.openai.temperature = 0.9;
+    characters."Aria".presets.openai.temperature = 0.4;
   };
 };
 ```
@@ -742,13 +742,27 @@ The generated presets use `policy = "missing"`: a preset you tune in the UI
 survives `nixos-rebuild`. The manifest is the exception — it is derived state,
 so it uses `overwrite`.
 
-**What this version does not do.** It does not switch preset automatically. The
-presets appear in the UI's dropdowns, and selecting one now brings its backend
-with it, but nothing watches for a model or character change and selects the
-matching preset for you. A client extension that does that — and that **appends**
-a Connection Profile with the manifest's stable id if it is missing, never
-seeding or rewriting `extension_settings.connectionManager.profiles`, which is a
-JSON *array* the user owns — is the next phase.
+**Automatic switching is the bundled `Model Layers` extension.** It is a
+built-in client extension (`public/scripts/extensions/model-layers/`), enabled
+by default. It reads `user/files/st-model-layers.json` and, whenever the active
+model changes — including a custom/Ollama id typed into the model field — it
+selects the manifest's preset in every bucket, preferring a character-level
+variant when the current chat has one. Changing the model therefore changes the
+sampling settings, the connection, the reasoning template and the per-model
+`extensions` block in one step.
+
+With **pin** on (the default), the values the active preset actually declares
+are restored when you edit them, until you select another model. Only declared
+keys are pinned: a field the catalog never mentions stays yours to change, and
+the connection keys (`custom_url`, `custom_model`, `chat_completion_source`) are
+never pinned, because changing one of those is how you switch models. The
+extension does not create Connection Profiles; profiles remain user-owned UI
+state.
+
+A `presets.reasoning` layer may carry the three template fields
+(`prefix`, `separator`, `suffix`) plus any of `auto_parse`, `auto_expand`,
+`show_hidden`, `add_to_prompts` and `max_additions`. Upstream's preset switch
+only reads the first three; the extension applies and pins the rest.
 
 ## What this module writes at the data root
 

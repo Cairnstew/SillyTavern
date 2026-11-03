@@ -1,0 +1,14 @@
+{
+    "display_name": "Model Layers",
+    "loading_order": 50,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "nixos-config",
+    "version": "1.0.0",
+    "homePage": "https://github.com/Cairnstew/SillyTavern",
+    "hooks": {
+        "activate": "init"
+    }
+}
