@@ -645,10 +645,7 @@ export async function init() {
         scheduleApply();
     });
 
-    // APP_READY has already fired if the extension was enabled mid-session.
-    // Otherwise the settings (and therefore preset registries) are not loaded
-    // yet and the APP_READY listener above performs the first apply.
-    if (openai_setting_names) {
-        await onAppReady();
-    }
+    // Activation happens while settings are still loading, so the first apply
+    // MUST wait for APP_READY. Enabling the extension from the UI reloads the
+    // page, which brings us back through this same path.
 }
