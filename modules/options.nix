@@ -3060,8 +3060,8 @@ equivalents.
 
     settingsExtra = {
       mainApi = mkOption {
-        type = types.str;
-        default = "openai";
+        type = types.nullOr types.str;
+        default = null;
         description = ''
           The AI provider selected in the UI (Settings → AI Configuration).
           This is the account's *connection* setting — the server-side
@@ -3070,8 +3070,8 @@ equivalents.
       };
 
       maxContext = mkOption {
-        type = types.int;
-        default = 4096;
+        type = types.nullOr types.int;
+        default = null;
         description = ''
           Default max context size (in tokens) for new chats. The UI exposes
           this as a quick-setting; the server clamps it to the model's limit.
@@ -3080,44 +3080,44 @@ equivalents.
 
       background = {
         url = mkOption {
-          type = types.str;
-          default = "";
+          type = types.nullOr types.str;
+          default = null;
           description = ''
-            URL of the background image. Empty means the default background.
+            URL of the background image. Unset keeps whatever the UI saved.
           '';
         };
         name = mkOption {
-          type = types.str;
-          default = "";
+          type = types.nullOr types.str;
+          default = null;
           description = ''
             Display name for the background (used in the background picker).
           '';
         };
         fitting = mkOption {
-          type = types.str;
-          default = "cover";
+          type = types.nullOr types.str;
+          default = null;
           description = ''
             How the background image fits the viewport. One of "cover",
             "contain", "stretch", "center".
           '';
         };
         animation = mkOption {
-          type = types.str;
-          default = "none";
+          type = types.nullOr types.str;
+          default = null;
           description = ''
             Animation applied to the background. One of "none", "pan", "zoom".
           '';
         };
         sortOrder = mkOption {
-          type = types.int;
-          default = 0;
+          type = types.nullOr types.int;
+          default = null;
           description = ''
             Sort order in the background gallery. Lower values appear first.
           '';
         };
         thumbnailColumns = mkOption {
-          type = types.int;
-          default = 4;
+          type = types.nullOr types.int;
+          default = null;
           description = ''
             Number of thumbnail columns in the background gallery.
           '';
@@ -3155,8 +3155,8 @@ equivalents.
       };
 
       selectedProxy = mkOption {
-        type = types.int;
-        default = 0;
+        type = types.nullOr types.int;
+        default = null;
         description = ''
           Index into `settingsExtra.proxies` of the active proxy. 0 means
           "no proxy" (the default).
@@ -3164,8 +3164,8 @@ equivalents.
       };
 
       swipes = mkOption {
-        type = types.bool;
-        default = true;
+        type = types.nullOr types.bool;
+        default = null;
         description = ''
           Whether swipe actions (swipe left/right to navigate message history)
           are enabled. The UI exposes this as a toggle under Settings →
@@ -3174,8 +3174,8 @@ equivalents.
       };
 
       username = mkOption {
-        type = types.str;
-        default = "";
+        type = types.nullOr types.str;
+        default = null;
         description = ''
           The account's display name. Empty means the account handle is used.
           This is separate from the account *handle* (which is the directory

@@ -215,23 +215,18 @@ def test_typed_settings_tree_writes_no_nulls(live_server: LiveServer) -> None:
     assert nulls == [], f"null written into settings.json at: {nulls}"
 
 
-def test_settings_extra_defaults_present(live_server: LiveServer) -> None:
-    """`settingsExtra` seeds the top-level keys it models.
+def test_settings_extra_declared_values_seed(live_server: LiveServer) -> None:
+    """`settingsExtra` seeds what it declares; unset defaults are pruned.
 
-    `settingsExtra` is deep-merged alongside `settings.common`, so its
-    defaults must not displace a value `settings.common` set.
+    The fixture declares `powerUser.chat_width` and
+    `worldInfoSettings.world_info_depth`. The old concrete defaults
+    (`username: ""`, `background.fitting: "cover"`, `proxies: []`, …) are no
+    longer written, so a UI-edited profile survives a rebuild.
     """
     settings = read_settings(live_server.data_root)
-    for key in (
-        "background",
-        "extension_settings",
-        "proxies",
-        "selected_proxy",
-        "swipes",
-        "username",
-    ):
-        assert key in settings, f"settingsExtra did not seed {key!r}"
-    assert settings["main_api"] == "openai", "settingsExtra displaced settings.common"
+    assert settings["power_user"]["chat_width"] == 60
+    assert settings["world_info_settings"]["world_info_depth"] == 4
+    assert settings["main_api"] == "openai"  # from settings.common, not settingsExtra
 
 
 # ── Seeded files land, with the right content and mode ──────────────────────

@@ -755,21 +755,22 @@ let
 
   # ── Render settingsExtra into settings.json keys ─────────────────────────
   #
-  # The new first-class options under `settingsExtra` map to top-level keys
-  # in per-account `settings.json`. They are deep-merged in the order:
-  #   settingsExtra (defaults) → settings.common → settings.byUser.<handle>
+  # The first-class options under `settingsExtra` map to top-level keys in
+  # per-account `settings.json`, deep-merged in the order:
+  #   settingsExtra → settings.common → settings.byUser.<handle>
   # so a per-account override always wins.
-  extraSettings = {
+  #
+  # EVERY field is PRUNED: an unset option is `null` (or an empty object/list)
+  # and is left out entirely. Writing the old concrete defaults — username "",
+  # background.fitting "cover", proxies [], selected_proxy 0, swipes true,
+  # main_api "openai", max_context 4096 — overwrote the same keys the UI owns
+  # on every activation, so a profile edited in SillyTavern was reset by the
+  # next rebuild. `null` means "not declared": the account keeps whatever the
+  # UI saved, or upstream's own default when the key is absent.
+  extraSettings = lib.filterAttrs (_: v: v != null && v != { } && v != [ ]) {
     main_api = cfg.settingsExtra.mainApi;
     max_context = cfg.settingsExtra.maxContext;
-    background = {
-      url = cfg.settingsExtra.background.url;
-      name = cfg.settingsExtra.background.name;
-      fitting = cfg.settingsExtra.background.fitting;
-      animation = cfg.settingsExtra.background.animation;
-      sortOrder = cfg.settingsExtra.background.sortOrder;
-      thumbnailColumns = cfg.settingsExtra.background.thumbnailColumns;
-    };
+    background = settingsTree.prune cfg.settingsExtra.background;
     proxies = map (p: {
       name = p.name;
       url = p.url;
@@ -783,18 +784,7 @@ let
     # per-account value) overrides them leaf by leaf.
     extension_settings = st.deepMerge ttsExtensionSettings cfg.settingsExtra.extensionSettings;
 
-    # The seven typed UI subtrees.
-    #
-    # PRUNED before they are merged: every leaf of a typed tree is
-    # `nullOr <type>` with `default = null`, so the option's value contains
-    # one null per declared field. `null` means "not declared" — the account
-    # keeps upstream's own default — and writing those nulls into
-    # `settings.json` would *override* upstream's defaults with null.
-    #
-    # A subtree with nothing declared prunes to `{}` and is left out
-    # entirely, so an account that declares nothing gets exactly the
-    # `settings.json` it got before this option existed.
-  } // lib.filterAttrs (_: v: v != { }) {
+    # The seven typed UI subtrees (also pruned of their per-field nulls).
     power_user = settingsTree.prune cfg.settingsExtra.powerUser;
     oai_settings = settingsTree.prune cfg.settingsExtra.oaiSettings;
     textgenerationwebui_settings = settingsTree.prune cfg.settingsExtra.textGenerationSettings;

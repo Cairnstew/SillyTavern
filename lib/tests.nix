@@ -1849,11 +1849,39 @@ rec {
     assert s.proxies == [ { name = "Corp"; url = "http://proxy:8080"; password = "secret"; } ];
     assert s.selected_proxy == 1;
     assert s.extension_settings.disabledExtensions == [ "caption" ];
-    # defaults present when unset
-    assert s.background.fitting == "cover";
+    # unset leaves are pruned, not filled with the old concrete defaults
+    assert !(s.background ? fitting);
     pkgs.runCommand "sillytavern-check-settings-extra" { }
       ''
         echo "PASS settings-extra"
+        touch "$out"
+      '';
+
+  # ── 21b2. Unset settingsExtra defaults are NOT written ────────────────────
+  settingsExtraPruned =
+    pkgs:
+    let
+      system = evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          config.enableUserAccounts = true;
+          users.seanc.passwordFile = pkgs.writeText "pw" "not-a-real-password";
+        };
+      };
+      s = system.config.services.sillytavern-nixos.internal.seedSpecJson.users.seanc.settings;
+    in
+    # These used to be concrete defaults and reset the UI-managed profile on
+    # every activation. An unset option must not appear in the seed spec at all.
+    assert !(s ? username);
+    assert !(s ? background);
+    assert !(s ? proxies);
+    assert !(s ? selected_proxy);
+    assert !(s ? swipes);
+    assert !(s ? main_api);
+    assert !(s ? max_context);
+    pkgs.runCommand "sillytavern-check-settings-extra-pruned" { }
+      ''
+        echo "PASS settings-extra-pruned"
         touch "$out"
       '';
 
@@ -3809,6 +3837,7 @@ rec {
       filesByUserEvaluates = filesByUserEvaluates pkgs;
       settingsDeepMerge = settingsDeepMerge pkgs;
       settingsExtraRendered = settingsExtraRendered pkgs;
+      settingsExtraPruned = settingsExtraPruned pkgs;
       settingsExtraMergeOrder = settingsExtraMergeOrder pkgs;
       settingsKeysKnown = settingsKeysKnown pkgs;
       settingsTypedTree = settingsTypedTree pkgs;

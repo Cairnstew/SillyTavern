@@ -44,7 +44,7 @@ checkout with no venv and no `pip install`.
 | Config | `test_rendered_config_is_read_only` | The config is a store path, by design |
 | Settings | `test_settings_common_is_seeded` | `settings.common` lands in `settings.json` |
 | Settings | `test_settings_byuser_overrides_common` | `settings.byUser` wins on a shared leaf |
-| Settings | `test_settings_extra_defaults_present` | `settingsExtra` seeds its keys without displacing `common` |
+| Settings | `test_settings_extra_declared_values_seed` | `settingsExtra` seeds declared keys, not the old concrete defaults |
 | Files | `test_seeded_file_lands` | Every seedable per-account directory accepts a file |
 | Files | `test_seeded_file_is_owner_only` | Seeded files are mode 0600 |
 | Files | `test_seeded_json_file_lands` | A `{ json = …; }` seed is written as JSON |
