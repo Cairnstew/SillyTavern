@@ -51,10 +51,12 @@ export const info = {
 };
 
 /**
- * @param {import('express').Express} app
+ * The loader passes an Express Router that it mounts at /api/plugins/<id>, so
+ * register paths RELATIVE to that prefix.
+ * @param {import('express').Router} router
  */
-export async function init(app) {
-    app.get('/api/plugins/chub-search/search', async (request, response) => {
+export async function init(router) {
+    router.get('/search', async (request, response) => {
         try {
             const params = new URLSearchParams();
             params.set('namespace', 'characters');
