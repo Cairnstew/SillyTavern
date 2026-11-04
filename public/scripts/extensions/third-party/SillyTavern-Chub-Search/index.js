@@ -5,11 +5,10 @@ import {
     processDroppedFiles,
     callPopup
 } from "../../../../script.js";
-import { delay, debounce } from "../../../utils.js";
+import { debounce } from "../../../utils.js";
 import { extension_settings } from "../../../extensions.js";
 
 const extensionName = "SillyTavern-Chub-Search";
-const extensionFolderPath = `scripts/extensions/${extensionName}/`;
 
 // Endpoint for API call
 const API_ENDPOINT_SEARCH = "/api/plugins/chub-search/search";
@@ -101,6 +100,7 @@ async function downloadCharacter(input) {
 function updateCharacterListInView(characters) {
     if (characterListContainer) {
         characterListContainer.innerHTML = characters.map(generateCharacterListItem).join('');
+        scanBrokenThumbnails(characterListContainer);
     }
 }
 
@@ -122,6 +122,78 @@ function makeTagPermutations(tags) {
         }
     }
     return permutations;
+}
+
+/**
+ * Escapes text before it is interpolated into the list's innerHTML. The API
+ * returns author-controlled strings (names, taglines, tags), so treating them
+ * as HTML is an injection risk and can also break the markup.
+ * @param {unknown} value
+ * @returns {string}
+ */
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+}
+
+/**
+ * The search response's `avatar_url` is authoritative: it can point at a
+ * DIFFERENT creator segment than `fullPath` (e.g. a renamed account), so the
+ * naive `avatars.charhub.io/avatars/<fullPath>/avatar.webp` pattern 404s for
+ * those cards. Only fall back to the pattern when the field is missing.
+ * @param {{ fullPath: string, avatar_url?: string | null }} node
+ * @returns {string}
+ */
+function getAvatarUrl(node) {
+    if (node.avatar_url) {
+        return node.avatar_url;
+    }
+    return `https://avatars.charhub.io/avatars/${node.fullPath}/avatar.webp`;
+}
+
+/**
+ * A broken avatar leaves an empty/alt-text image in the list. Replace it with
+ * a neutral placeholder rather than the browser's broken-image icon.
+ * @param {HTMLImageElement} image
+ */
+function markBrokenThumbnail(image) {
+    image.classList.add('thumbnail-missing');
+    image.removeAttribute('src');
+    image.removeAttribute('srcset');
+}
+
+/**
+ * Error events do not bubble, so listen in the capture phase on the container.
+ * Attached once; every re-render (innerHTML) is covered by the same listener.
+ * @param {HTMLElement | null} container
+ */
+function hardenThumbnails(container) {
+    if (!container || container.dataset.thumbnailsHardened === 'true') {
+        return;
+    }
+    container.dataset.thumbnailsHardened = 'true';
+    container.addEventListener('error', (event) => {
+        const target = event.target;
+        if (target instanceof HTMLImageElement && target.classList.contains('thumbnail')) {
+            markBrokenThumbnail(target);
+        }
+    }, true);
+}
+
+/**
+ * Marks images that already failed before the listener was attached.
+ * @param {HTMLElement | null} container
+ */
+function scanBrokenThumbnails(container) {
+    container?.querySelectorAll('img.thumbnail').forEach((image) => {
+        if (image.complete && image.naturalWidth === 0) {
+            markBrokenThumbnail(image);
+        }
+    });
 }
 
 /**
@@ -173,23 +245,16 @@ async function fetchCharactersBySearch({ searchTerm, includeTags, excludeTags, n
     chubCharacters = [];
 
     const nodes = searchData?.data?.nodes ?? [];
-    if (nodes.length === 0) {
-        return chubCharacters;
-    }
-    let charactersPromises = nodes.map(node => getCharacter(node.fullPath));
-    let characterBlobs = await Promise.all(charactersPromises);
-
-    characterBlobs.forEach((character, i) => {
-        let imageUrl = URL.createObjectURL(character);
-        chubCharacters.push({
-            url: imageUrl,
-            description: nodes[i].tagline || "Description here...",
-            name: nodes[i].name,
-            fullPath: nodes[i].fullPath,
-            tags: nodes[i].topics,
-            author: nodes[i].fullPath.split('/')[0],
-        });
-    });
+    chubCharacters = nodes.map(node => ({
+        // Direct CDN URL, not a fetched Blob: the browser caches it, it needs
+        // no CORS grant, and a 404 surfaces as an <img> error we can handle.
+        url: getAvatarUrl(node),
+        description: node.tagline || "Description here...",
+        name: node.name || "Default Name",
+        fullPath: node.fullPath,
+        tags: Array.isArray(node.topics) ? node.topics : [],
+        author: (node.fullPath || '').split('/')[0] || 'unknown',
+    }));
 
     return chubCharacters;
 }
@@ -250,19 +315,22 @@ async function executeCharacterSearch(options) {
  * @returns {string} - Returns an HTML string representation of the character list item.
  */
 function generateCharacterListItem(character, index) {
+    const fullPath = escapeHtml(character.fullPath);
+    const profileUrl = `https://chub.ai/characters/${encodeURI(character.fullPath)}`;
+    const authorUrl = `https://chub.ai/users/${encodeURI(character.author)}`;
+    const tags = character.tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join('');
     return `
         <div class="character-list-item" data-index="${index}">
-            <img class="thumbnail" src="${character.url}">
+            <img class="thumbnail" src="${escapeHtml(character.url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">
             <div class="info">
-                
-                <a href="https://chub.ai/characters/${character.fullPath}" target="_blank"><div class="name">${character.name || "Default Name"}</a>
-                <a href="https://chub.ai/users/${character.author}" target="_blank">
-                 <span class="author">by ${character.author}</span>
-                </a></div>
-                <div class="description">${character.description}</div>
-                <div class="tags">${character.tags.map(tag => `<span class="tag">${tag}</span>`).join('')}</div>
+                <a href="${profileUrl}" target="_blank" rel="noopener noreferrer"><div class="name">${escapeHtml(character.name)}</div></a>
+                <a href="${authorUrl}" target="_blank" rel="noopener noreferrer">
+                 <span class="author">by ${escapeHtml(character.author)}</span>
+                </a>
+                <div class="description">${escapeHtml(character.description)}</div>
+                <div class="tags">${tags}</div>
             </div>
-            <div data-path="${character.fullPath}" class="menu_button download-btn fa-solid fa-cloud-arrow-down faSmallFontSquareFix"></div>
+            <div data-path="${fullPath}" class="menu_button download-btn fa-solid fa-cloud-arrow-down faSmallFontSquareFix"></div>
         </div>
     `;
 }
@@ -363,13 +431,18 @@ async function displayCharactersInListViewPopup() {
             savedPopupContent = document.querySelector('.list-and-search-wrapper');
         });
 
-    characterListContainer = document.querySelector('.character-list-popup');   
+    characterListContainer = document.querySelector('.character-list-popup');
+    hardenThumbnails(characterListContainer);
+    scanBrokenThumbnails(characterListContainer);
 
     let clone = null;  // Store reference to the cloned image
 
     characterListContainer.addEventListener('click', function (event) {
         if (event.target.tagName === 'IMG') {
             const image = event.target;
+            if (image.classList.contains('thumbnail-missing')) {
+                return;
+            }
 
             if (clone) {  // If clone exists, remove it
                 document.body.removeChild(clone);
@@ -480,29 +553,6 @@ async function displayCharactersInListViewPopup() {
     );
 }
 
-/**
- * Fetches a character by making an API call.
- * 
- * Fetches the character's avatar from the Chub CDN and returns it as a blob.
- * 
- * @async
- * @function
- * @param {string} fullPath - The unique path/reference for the character to be fetched.
- * @returns {Promise<Blob>} - Resolves with a Blob of the fetched character data.
- */
-async function getCharacter(fullPath) {
-    // The old api.chub.ai download endpoint now answers 405; the avatar CDN is
-    // the supported thumbnail source (also what the search response's
-    // avatar_url points at).
-    let response = await fetch(
-        `https://avatars.charhub.io/avatars/${fullPath}/avatar.webp`,
-        {
-            method: "GET",
-        }
-    );
-    let data = await response.blob();
-    return data;
-}
 
 /**
  * jQuery document-ready block:

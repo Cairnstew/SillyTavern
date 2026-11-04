@@ -91,3 +91,14 @@ body img.thumbnail {
 .searching {
     filter: grayscale(100%);
 }
+/* A missing/broken avatar: index.js removes the src and adds this class, so
+   the browser's broken-image icon is replaced by a neutral silhouette. */
+.character-list-item img.thumbnail.thumbnail-missing {
+    background-color: var(--SmartThemeBlurTintColor, #333);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23888'%3E%3Cpath d='M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10Zm0 2c-4.4 0-8 2.2-8 5v1h16v-1c0-2.8-3.6-5-8-5Z'/%3E%3C/svg%3E");
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: 56px 56px;
+    border-radius: 6px;
+    opacity: 0.85;
+}
