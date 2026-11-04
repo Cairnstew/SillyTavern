@@ -2894,6 +2894,34 @@ equivalents.
       '';
     };
 
+    settingsPolicy = mkOption {
+      type = types.enum [ "merge" "missing" ];
+      default = "merge";
+      example = "missing";
+      description = ''
+        What happens to an account's `settings.json` when the file already exists.
+
+        `"merge"` (the default) deep-merges `settingsExtra` and `settings.common`
+        into the existing file on every activation, with the declared side
+        winning. That is what applies declarative defaults to existing accounts —
+        and it is also why a UI-edited `username`, background or proxy list can be
+        reset by a rebuild.
+
+        `"missing"` writes the initial settings only when the account has no
+        `settings.json` yet. After that the UI owns the file and a rebuild never
+        changes it. Use it when the account's profile must survive rebuilds; the
+        trade-off is that later changes to `settingsExtra`/`settings.common` no
+        longer reach existing accounts (delete the account's `settings.json` to
+        re-seed).
+
+        This is separate from `seedPolicy`, which governs the other seeded files.
+        `settings.json` is always deep-merged when it is written at all, even
+        under `seedPolicy = "overwrite"`, because the server rewrites it at
+        runtime and a wholesale write would destroy keys this module does not
+        model.
+      '';
+    };
+
     # ── Instance-wide custom CSS ──────────────────────────────────────────────
     #
     # SillyTavern loads `css/user.css` on every page (`public/index.html:46`) and

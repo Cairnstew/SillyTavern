@@ -240,6 +240,13 @@ services.sillytavern-nixos = {
   edit made in the UI survives the next rebuild. `"overwrite"` restores the
   declared value every activation — note that it is *not* constant, since
   SillyTavern rewrites `settings.json` at runtime regardless.
+- **`settingsPolicy`** is separate and defaults to `"merge"`: `settingsExtra`
+  and `settings.common` are deep-merged into an existing `settings.json` on
+  every activation, with the declared side winning. Set it to `"missing"` when
+  the account's UI-managed profile (`username`, background, proxies, persona
+  settings) must survive rebuilds; the file is then written only when it does
+  not exist yet. The trade-off is that later declarative settings changes stop
+  reaching existing accounts until their `settings.json` is deleted.
 
 ## Named profiles: `presets.*`
 

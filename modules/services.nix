@@ -266,11 +266,12 @@ let
     # LAST, because it is keyed by account handle and the account directories
     # have to exist first.
     + lib.optionalString (seedSpec != null) ''
-      echo "sillytavern: seeding JSON state into ${cfg.dataRoot} (policy: ${cfg.seedPolicy})" >&2
+      echo "sillytavern: seeding JSON state into ${cfg.dataRoot} (policy: ${cfg.seedPolicy}, settings: ${cfg.settingsPolicy})" >&2
       ${lib.getExe python} ${jsonSeeder} \
         --data-root ${lib.escapeShellArg cfg.dataRoot} \
         --spec ${jsonSeederSpec} \
-        --policy ${lib.escapeShellArg cfg.seedPolicy}
+        --policy ${lib.escapeShellArg cfg.seedPolicy} \
+        --settings-policy ${lib.escapeShellArg cfg.settingsPolicy}
     '';
 
 in

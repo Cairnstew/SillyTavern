@@ -341,6 +341,34 @@ class SettingsMergeTests(unittest.TestCase):
             json.loads((self.user / "settings.json").read_text()), {"main_api": "custom"}
         )
 
+    def test_settings_policy_missing_creates_when_absent(self):
+        seeder.seed_settings(
+            str(self.user),
+            {"main_api": "custom"},
+            "missing",
+            False,
+            self.stats,
+            settings_policy="missing",
+        )
+        self.assertEqual(
+            json.loads((self.user / "settings.json").read_text()), {"main_api": "custom"}
+        )
+
+    def test_settings_policy_missing_leaves_existing_file_alone(self):
+        existing = {"username": "Sean", "power_user": {"personas": {"a": "Sean"}}}
+        write_json(self.user / "settings.json", existing)
+        seeder.seed_settings(
+            str(self.user),
+            {"username": "", "main_api": "openai"},
+            "missing",
+            False,
+            self.stats,
+            settings_policy="missing",
+        )
+        self.assertEqual(json.loads((self.user / "settings.json").read_text()), existing)
+        self.assertEqual(self.stats["skipped"], 1)
+        self.assertEqual(self.stats["written"], 0)
+
     def test_preserves_keys_the_module_never_declared(self):
         write_json(self.user / "settings.json", {"unknown_future_key": 42})
         seeder.seed_settings(str(self.user), {"main_api": "custom"}, "missing", False, self.stats)

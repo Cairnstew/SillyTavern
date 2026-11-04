@@ -377,15 +377,27 @@ def seed_file(
 
 
 def seed_settings(
-    user_dir: str, settings: dict, policy: str, dry_run: bool, stats: dict
+    user_dir: str,
+    settings: dict,
+    policy: str,
+    dry_run: bool,
+    stats: dict,
+    settings_policy: str = "merge",
 ) -> None:
     """Deep-merge `settings` into an account's settings.json.
 
     Merged rather than replaced under BOTH policies. The server rewrites this
     file on nearly every interaction and carries keys nobody enumerated, so a
     wholesale write is data loss even when the operator asked to overwrite.
+
+    ``settings_policy="missing"`` is the create-only mode: an account that
+    already has a settings.json keeps it untouched, which is how a UI-managed
+    profile (username, background, proxies) survives rebuilds.
     """
     target = os.path.join(user_dir, "settings.json")
+    if settings_policy == "missing" and os.path.exists(target):
+        stats["skipped"] += 1
+        return
     existing: dict = {}
     if os.path.exists(target):
         try:
@@ -508,7 +520,13 @@ def seed_secrets(
     )
 
 
-def apply_spec(spec: dict, data_root: str, policy: str, dry_run: bool) -> dict:
+def apply_spec(
+    spec: dict,
+    data_root: str,
+    policy: str,
+    dry_run: bool,
+    settings_policy: str = "merge",
+) -> dict:
     stats = {"written": 0, "skipped": 0}
 
     for rel, content in (spec.get("dataRootFiles") or {}).items():
@@ -520,7 +538,7 @@ def apply_spec(spec: dict, data_root: str, policy: str, dry_run: bool) -> dict:
             os.makedirs(user_dir, exist_ok=True)
         settings = userspec.get("settings") or {}
         if settings:
-            seed_settings(user_dir, settings, policy, dry_run, stats)
+            seed_settings(user_dir, settings, policy, dry_run, stats, settings_policy)
         secrets = userspec.get("secrets") or {}
         if secrets:
             seed_secrets(user_dir, secrets, policy, dry_run, stats)
@@ -535,6 +553,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--data-root", required=True)
     ap.add_argument("--spec", required=True, help="JSON file describing what to seed")
     ap.add_argument("--policy", choices=["missing", "overwrite"], default="missing")
+    ap.add_argument("--settings-policy", choices=["merge", "missing"], default="merge")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
 
@@ -546,7 +565,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        stats = apply_spec(spec, args.data_root, args.policy, args.dry_run)
+        stats = apply_spec(
+            spec, args.data_root, args.policy, args.dry_run, args.settings_policy
+        )
     except SeedError as exc:
         _log(f"refusing to seed: {exc}")
         return 2
@@ -556,7 +577,8 @@ def main(argv: list[str] | None = None) -> int:
 
     _log(
         f"{stats['written']} written, {stats['skipped']} left alone "
-        f"(policy={args.policy}{', dry run' if args.dry_run else ''})"
+        f"(policy={args.policy}, settings={args.settings_policy}"
+        f"{', dry run' if args.dry_run else ''})"
     )
     return 0
 
