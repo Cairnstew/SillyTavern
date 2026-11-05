@@ -7,6 +7,7 @@ const EXTENSION_NAME = 'SillyTavern - Choices!';
 const STORAGE_KEY = 'st_choices';
 
 let isGenerating = false;
+let pendingSuggestionIndex = null;
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -26,7 +27,7 @@ One sentence under 25 words: a concrete action, line of dialogue, or decision {{
 
 If first person, use "I ..." as {{user}}. If third person, name {{user}} ("{{user}} ...") rather than using "he" or "she". Never use second person ("you", "your").
 
-Do not describe {{user}}'s feelings or physical sensations. Do not write {{char}}'s dialogue, thoughts, or reactions, and do not have {{char}} act or react.
+Do not describe {{user}}'s feelings or physical sensations. Do not write any other character's dialogue, thoughts, or reactions, and do not have them act or react.
 
 Output only the suggestion, with no quotes, backticks, or commentary.`,
     llm_prompt_impersonate: '{{suggestionText}}',
@@ -59,7 +60,7 @@ const SLOT_RULES = [
     { intent: 'ease the tension', person: 'first' },
     { intent: 'raise the stakes', person: 'third' },
     { intent: 'ask a question or investigate', person: 'first' },
-    { intent: 'show emotion or connect with {{char}} through a gesture or line', person: 'third' },
+    { intent: 'show emotion or connect through a gesture or line', person: 'third' },
     { intent: 'do something unexpected or risky', person: 'first' },
 ];
 
@@ -179,7 +180,7 @@ async function renderSuggestions(choices, messageIndex, skipSave = false) {
         .on('click', async () => {
             await clearChoicesForMessage(messageIndex);
             $message.find('.st-choices-container').remove();
-            await generateSuggestions();
+            await generateSuggestions(messageIndex, true);
         })
         .appendTo($container);
 
@@ -204,7 +205,7 @@ function renderFallbackButton(messageIndex) {
         .on('click', async () => {
             console.log(`[${EXTENSION_NAME}] ⚡ Fallback button clicked for message ${messageIndex}`);
             $message.find('.st-choices-container').remove();
-            await generateSuggestions();
+            await generateSuggestions(messageIndex, true);
         })
         .appendTo($container);
 
@@ -248,7 +249,7 @@ async function restoreAllChoices() {
     // Check if last message needs fallback button
     const { chat } = SillyTavern.getContext();
     const lastIndex = chat.length - 1;
-    if (lastIndex >= 0 && !chat[lastIndex].is_user) {
+    if (lastIndex >= 0 && !chat[lastIndex].is_user && !chat[lastIndex].is_system) {
         const messageIndexStr = String(lastIndex);
         const hasSavedChoices = store?.[messageIndexStr] && Array.isArray(store[messageIndexStr]) && store[messageIndexStr].length > 0;
         const $lastMessage = $(`.mes[mesid="${lastIndex}"]`);
@@ -279,8 +280,13 @@ async function handleChoiceClick(messageIndex, choiceText) {
 // Generation
 // ---------------------------------------------------------------------------
 
-async function generateSuggestions() {
-    if (isGenerating) return;
+async function generateSuggestions(messageIndex = null, force = false) {
+    if (isGenerating) {
+        // A new group turn can finish while the previous set is still being
+        // generated. Remember the latest message and run it after this one.
+        if (!force && Number.isInteger(messageIndex)) pendingSuggestionIndex = messageIndex;
+        return;
+    }
     isGenerating = true;
 
     try {
@@ -288,6 +294,10 @@ async function generateSuggestions() {
         const settings = getSettings();
 
         if (!settings.enabled || !chat.length) return;
+
+        const targetIndex = Number.isInteger(messageIndex) ? messageIndex : chat.length - 1;
+        const target = chat[targetIndex];
+        if (!target || target.is_user || target.is_system) return;
 
         // A prompt with {{intent}}/{{person}} means "one suggestion per call".
         // Anything else keeps the legacy single-call + parse path so an old
@@ -328,17 +338,30 @@ async function generateSuggestions() {
             console.log(`[${EXTENSION_NAME}] Parsed ${choices.length} suggestions:`, choices);
         }
 
-        if (!choices.length) {
-            console.warn(`[${EXTENSION_NAME}] ⚠ No suggestions generated`);
-            renderFallbackButton(chat.length - 1);
+        // A newer message (next group member, or a user message) means these
+        // suggestions belong to an old turn.
+        const latest = SillyTavern.getContext().chat;
+        if (!force && (targetIndex !== latest.length - 1 || !latest[targetIndex] || latest[targetIndex].is_user)) {
+            console.log(`[${EXTENSION_NAME}] ⏭ Dropping stale suggestions for message ${targetIndex}`);
             return;
         }
 
-        await renderSuggestions(choices, chat.length - 1);
+        if (!choices.length) {
+            console.warn(`[${EXTENSION_NAME}] ⚠ No suggestions generated`);
+            renderFallbackButton(targetIndex);
+            return;
+        }
+
+        await renderSuggestions(choices, targetIndex);
     } catch (err) {
         console.error(`[${EXTENSION_NAME}] ❌ generateSuggestions error:`, err);
     } finally {
         isGenerating = false;
+        if (pendingSuggestionIndex !== null) {
+            const next = pendingSuggestionIndex;
+            pendingSuggestionIndex = null;
+            setTimeout(() => generateSuggestions(next), 0);
+        }
     }
 }
 
@@ -405,7 +428,7 @@ function renderSettings() {
                         <div class="cyoa-setting-group">
                             <label for="${MODULE_NAME}_llm_prompt">LLM Prompt (one suggestion per call):</label>
                             <textarea id="${MODULE_NAME}_llm_prompt" rows="10">${settings.llm_prompt}</textarea>
-                            <small class="cyoa-setting-hint">Placeholders: {{intent}}, {{person}}, {{user}}, {{char}}</small>
+                            <small class="cyoa-setting-hint">Placeholders: {{intent}}, {{person}}, {{user}}</small>
                         </div>
                         <div class="cyoa-setting-group">
                             <label for="${MODULE_NAME}_llm_prompt_impersonate">Impersonation Prompt:</label>
@@ -490,9 +513,25 @@ $(document).ready(async function () {
 
     // CHARACTER_MESSAGE_RENDERED: fires after the AI message is in the DOM.
     // Confirmed working: eventTypes.CHARACTER_MESSAGE_RENDERED = 'character_message_rendered'
-    eventSource.on(eventTypes.CHARACTER_MESSAGE_RENDERED, (messageIndex) => {
-        console.log(`[${EXTENSION_NAME}] 🔔 CHARACTER_MESSAGE_RENDERED index=${messageIndex}`);
-        generateSuggestions();
+    eventSource.on(eventTypes.CHARACTER_MESSAGE_RENDERED, (messageIndex, type) => {
+        console.log(`[${EXTENSION_NAME}] 🔔 CHARACTER_MESSAGE_RENDERED index=${messageIndex} type=${type}`);
+        const { selected_group } = SillyTavern.getContext();
+        // A group turn emits one event per activated member. Wait for
+        // GROUP_WRAPPER_FINISHED so we suggest once, after the last member.
+        // First messages and manual inserts have no wrapper, so handle them.
+        if (selected_group && type !== 'first_message' && type !== 'command') return;
+        generateSuggestions(messageIndex);
+    });
+
+    // GROUP_WRAPPER_FINISHED: one event after every activated member has
+    // replied. Our own generateQuietPrompt calls are group wrappers of type
+    // 'quiet' and must not trigger another round.
+    eventSource.on(eventTypes.GROUP_WRAPPER_FINISHED, ({ type } = {}) => {
+        console.log(`[${EXTENSION_NAME}] 🔔 GROUP_WRAPPER_FINISHED type=${type}`);
+        if (type === 'quiet') return;
+        const { chat } = SillyTavern.getContext();
+        const last = chat.length - 1;
+        if (last >= 0) generateSuggestions(last);
     });
 
     // KEY FIX: use USER_MESSAGE_RENDERED instead of GENERATION_STARTED.
@@ -507,12 +546,11 @@ $(document).ready(async function () {
         const { chat } = SillyTavern.getContext();
         $('.st-choices-container').remove();
 
-        // Walk back to find the last AI message before the one just sent
+        // Clear every AI message since the last user message: a group turn
+        // can leave choices on more than one member message.
         for (let i = chat.length - 1; i >= 0; i--) {
-            if (!chat[i].is_user) {
-                await clearChoicesForMessage(i);
-                break;
-            }
+            if (chat[i].is_user) break;
+            await clearChoicesForMessage(i);
         }
     });
 
