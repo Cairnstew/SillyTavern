@@ -83,8 +83,13 @@ function cleanSuggestion(raw) {
         text = lines[0];
     }
 
-    // Strip one pair of wrapping quotes/backticks/asterisks and a label.
-    text = text.replace(/^(["'`*]+)([\s\S]*?)\1$/, '$2').trim();
+    // Strip one pair of wrapping quotes/backticks/asterisks, but only when
+    // the same character does not appear inside — otherwise a dialogue line
+    // like "I draw," I say, "and step." would lose its opening quote.
+    const wrapped = text.match(/^(["'`*]+)([\s\S]*?)\1$/);
+    if (wrapped && !wrapped[2].includes(wrapped[1])) {
+        text = wrapped[2].trim();
+    }
     text = text.replace(/^(?:suggestion|option|choice)\s*:\s*/i, '').trim();
     return text;
 }
