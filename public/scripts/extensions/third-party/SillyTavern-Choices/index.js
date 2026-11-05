@@ -14,8 +14,22 @@ let isGenerating = false;
 
 const defaultSettings = Object.freeze({
     enabled: true,
-    llm_prompt: `[System: Pause roleplay. Output ONLY {{suggestionNumber}} story beat suggestions, one per line, each wrapped in backticks. No other text, no numbering, no labels. Format exactly like this: \`Suggestion text goes here.\` \`Another suggestion text here.\` Each suggestion should be a single sentence from {{user}}'s perspective. Vary the tone: some should ease tension, some should raise it, some should be unexpected, some should advance the scene. Any response that does not follow this exact format will be discarded.]`,
-    llm_prompt_impersonate: '`{{suggestionText}}`',
+    // One suggestion per LLM call: the whole response is the suggestion, so
+    // there is no list format to parse. {{intent}} and {{person}} are filled
+    // in by the extension; {{user}}/{{char}} are SillyTavern macros.
+    llm_prompt: `Write one suggestion for what {{user}} could do or say next.
+
+Intent: {{intent}}.
+Write in {{person}} person.
+
+One sentence under 25 words: a concrete action, line of dialogue, or decision {{user}} could send. Never a thought, an internal question, or a description of the scene.
+
+If first person, use "I ..." as {{user}}. If third person, name {{user}} ("{{user}} ...") rather than using "he" or "she". Never use second person ("you", "your").
+
+Do not describe {{user}}'s feelings or physical sensations. Do not write {{char}}'s dialogue, thoughts, or reactions, and do not have {{char}} act or react.
+
+Output only the suggestion, with no quotes, backticks, or commentary.`,
+    llm_prompt_impersonate: '{{suggestionText}}',
     apply_wi_an: true,
     num_responses: 5,
     response_length: 500,
@@ -36,6 +50,43 @@ function getSettings() {
 
 function saveSettings() {
     SillyTavern.getContext().saveSettingsDebounced();
+}
+
+// One focused call per suggestion. Alternating person avoids a wall of
+// "I ..."; the intent keeps the set varied without asking one response to
+// carry every rule at once.
+const SLOT_RULES = [
+    { intent: 'ease the tension', person: 'first' },
+    { intent: 'raise the stakes', person: 'third' },
+    { intent: 'ask a question or investigate', person: 'first' },
+    { intent: 'show emotion or connect with {{char}} through a gesture or line', person: 'third' },
+    { intent: 'do something unexpected or risky', person: 'first' },
+];
+
+function buildSuggestionPrompt(slot, settings) {
+    return settings.llm_prompt
+        .replaceAll('{{intent}}', slot.intent)
+        .replaceAll('{{person}}', slot.person)
+        .replaceAll('{{suggestionNumber}}', '1');
+}
+
+function cleanSuggestion(raw) {
+    if (!raw) return '';
+    let text = String(raw).trim();
+    if (!text) return '';
+
+    // Keep the first substantive line if the model added a preamble.
+    const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+    if (lines.length > 1) {
+        text = lines[0].endsWith(':') ? lines[1] : lines[0];
+    } else if (lines.length === 1) {
+        text = lines[0];
+    }
+
+    // Strip one pair of wrapping quotes/backticks/asterisks and a label.
+    text = text.replace(/^(["'`*]+)([\s\S]*?)\1$/, '$2').trim();
+    text = text.replace(/^(?:suggestion|option|choice)\s*:\s*/i, '').trim();
+    return text;
 }
 
 // ---------------------------------------------------------------------------
@@ -233,27 +284,47 @@ async function generateSuggestions() {
 
         if (!settings.enabled || !chat.length) return;
 
-        const quietPrompt = settings.llm_prompt
-            .replace('{{suggestionNumber}}', settings.num_responses);
+        // A prompt with {{intent}}/{{person}} means "one suggestion per call".
+        // Anything else keeps the legacy single-call + parse path so an old
+        // saved prompt still works.
+        const perSuggestion = /\{\{\s*(intent|person)\s*\}\}/.test(settings.llm_prompt);
+        let choices = [];
 
-        // Object form: the positional form maps apply_wi_an -> skipWIAN
-        // (inverted) and response_length -> quietImage (ignored).
-        const response = await generateQuietPrompt({
-            quietPrompt,
-            quietToLoud: false,
-            skipWIAN: !settings.apply_wi_an,
-            responseLength: settings.response_length,
-        });
-
-        if (!response) {
-            console.warn(`[${EXTENSION_NAME}] ⚠ Empty response from generateQuietPrompt`);
-            renderFallbackButton(chat.length - 1);
-            return;
+        if (perSuggestion) {
+            const count = Math.max(1, Math.min(5, Number(settings.num_responses) || 5));
+            const slots = SLOT_RULES.slice(0, count);
+            for (const slot of slots) {
+                let text = '';
+                for (let attempt = 0; attempt < 2 && !text; attempt++) {
+                    const quietPrompt = buildSuggestionPrompt(slot, settings);
+                    // Object form: the positional form maps apply_wi_an ->
+                    // skipWIAN (inverted) and response_length -> quietImage.
+                    const response = await generateQuietPrompt({
+                        quietPrompt,
+                        quietToLoud: false,
+                        skipWIAN: !settings.apply_wi_an,
+                        responseLength: settings.response_length,
+                    });
+                    text = cleanSuggestion(response);
+                }
+                if (text) choices.push(text);
+            }
+            console.log(`[${EXTENSION_NAME}] Generated ${choices.length} suggestions:`, choices);
+        } else {
+            const quietPrompt = settings.llm_prompt
+                .replace('{{suggestionNumber}}', settings.num_responses);
+            const response = await generateQuietPrompt({
+                quietPrompt,
+                quietToLoud: false,
+                skipWIAN: !settings.apply_wi_an,
+                responseLength: settings.response_length,
+            });
+            choices = response ? parseSuggestions(response) : [];
+            console.log(`[${EXTENSION_NAME}] Parsed ${choices.length} suggestions:`, choices);
         }
 
-        const choices = parseSuggestions(response);
-        console.log(`[${EXTENSION_NAME}] Parsed ${choices.length} suggestions:`, choices);
         if (!choices.length) {
+            console.warn(`[${EXTENSION_NAME}] ⚠ No suggestions generated`);
             renderFallbackButton(chat.length - 1);
             return;
         }
@@ -327,8 +398,9 @@ function renderSettings() {
                             <input type="range" id="${MODULE_NAME}_num_responses" min="1" max="5" value="${settings.num_responses}">
                         </div>
                         <div class="cyoa-setting-group">
-                            <label for="${MODULE_NAME}_llm_prompt">LLM Prompt:</label>
+                            <label for="${MODULE_NAME}_llm_prompt">LLM Prompt (one suggestion per call):</label>
                             <textarea id="${MODULE_NAME}_llm_prompt" rows="10">${settings.llm_prompt}</textarea>
+                            <small class="cyoa-setting-hint">Placeholders: {{intent}}, {{person}}, {{user}}, {{char}}</small>
                         </div>
                         <div class="cyoa-setting-group">
                             <label for="${MODULE_NAME}_llm_prompt_impersonate">Impersonation Prompt:</label>
@@ -404,8 +476,6 @@ $(document).ready(async function () {
 
     const { eventSource, eventTypes } = SillyTavern.getContext();
 
-    eventSource.on(eventTypes.GENERATION_STOPPED, () => { isGenerating = false; });
-    eventSource.on(eventTypes.GENERATION_ENDED,   () => { isGenerating = false; });
 
     // CHAT_CHANGED: restore persisted choices. Fires before DOM is ready, so we poll.
     eventSource.on(eventTypes.CHAT_CHANGED, () => {
