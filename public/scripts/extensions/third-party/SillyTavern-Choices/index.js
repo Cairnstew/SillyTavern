@@ -1,0 +1,452 @@
+import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
+import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
+import { ARGUMENT_TYPE, SlashCommandArgument } from '../../../slash-commands/SlashCommandArgument.js';
+
+const MODULE_NAME = 'sillytavern_choices';
+const EXTENSION_NAME = 'SillyTavern - Choices!';
+const STORAGE_KEY = 'st_choices';
+
+let isGenerating = false;
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+const defaultSettings = Object.freeze({
+    enabled: true,
+    llm_prompt: `[System: Pause roleplay. Output ONLY {{suggestionNumber}} story beat suggestions, one per line, each wrapped in backticks. No other text, no numbering, no labels. Format exactly like this: \`Suggestion text goes here.\` \`Another suggestion text here.\` Each suggestion should be a single sentence from {{user}}'s perspective. Vary the tone: some should ease tension, some should raise it, some should be unexpected, some should advance the scene. Any response that does not follow this exact format will be discarded.]`,
+    llm_prompt_impersonate: '`{{suggestionText}}`',
+    apply_wi_an: true,
+    num_responses: 5,
+    response_length: 500,
+});
+
+function loadSettings() {
+    const { extensionSettings } = SillyTavern.getContext();
+    const { lodash } = SillyTavern.libs;
+    extensionSettings[MODULE_NAME] = lodash.merge(
+        structuredClone(defaultSettings),
+        extensionSettings[MODULE_NAME],
+    );
+}
+
+function getSettings() {
+    return SillyTavern.getContext().extensionSettings[MODULE_NAME];
+}
+
+function saveSettings() {
+    SillyTavern.getContext().saveSettingsDebounced();
+}
+
+// ---------------------------------------------------------------------------
+// Persistence — chatMetadata + saveMetadata()
+//
+// Never cache chatMetadata — re-fetch from getContext() every call.
+// Structure: chatMetadata[STORAGE_KEY] = { "<msgIndex>": ["choice1", ...] }
+// ---------------------------------------------------------------------------
+
+async function saveChoicesForMessage(messageIndex, choices) {
+    const { chatMetadata, saveMetadata } = SillyTavern.getContext();
+
+    if (!chatMetadata[STORAGE_KEY]) {
+        chatMetadata[STORAGE_KEY] = {};
+    }
+    chatMetadata[STORAGE_KEY][String(messageIndex)] = choices;
+
+    await saveMetadata();
+
+    // Re-fetch after save to confirm the data landed on the live object
+    const verify = SillyTavern.getContext().chatMetadata[STORAGE_KEY];
+    console.log(`[${EXTENSION_NAME}] ✅ Save complete. Verified store:`, JSON.stringify(verify));
+}
+
+async function clearChoicesForMessage(messageIndex) {
+    const { chatMetadata, saveMetadata } = SillyTavern.getContext();
+    const store = chatMetadata[STORAGE_KEY];
+
+    if (store?.[String(messageIndex)] !== undefined) {
+        delete store[String(messageIndex)];
+        await saveMetadata();
+        console.log(`[${EXTENSION_NAME}] 🗑 Cleared choices for message ${messageIndex}`);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DOM helpers
+// ---------------------------------------------------------------------------
+
+function waitForMessageElement(mesid, maxWaitMs = 3000) {
+    return new Promise((resolve) => {
+        const INTERVAL = 100;
+        let elapsed = 0;
+        const check = () => {
+            if ($(`.mes[mesid="${mesid}"]`).length) {
+                resolve(true);
+            } else if (elapsed >= maxWaitMs) {
+                console.warn(`[${EXTENSION_NAME}] ⚠ Timed out waiting for mesid=${mesid}`);
+                resolve(false);
+            } else {
+                elapsed += INTERVAL;
+                setTimeout(check, INTERVAL);
+            }
+        };
+        check();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+async function renderSuggestions(choices, messageIndex, skipSave = false) {
+    if (!skipSave) {
+        await saveChoicesForMessage(messageIndex, choices);
+    }
+
+    const $message = $(`.mes[mesid="${messageIndex}"]`);
+    if (!$message.length) {
+        console.error(`[${EXTENSION_NAME}] ❌ renderSuggestions: could not find mesid=${messageIndex}`);
+        return;
+    }
+
+    $message.find('.st-choices-container').remove();
+    const $container = $('<div class="st-choices-container"></div>');
+
+    choices.forEach((text, index) => {
+        $('<button class="st-choices-btn menu_button"></button>')
+            .text(`${index + 1}. ${text}`)
+            .on('click', () => handleChoiceClick(messageIndex, text))
+            .appendTo($container);
+    });
+
+    $('<button class="st-choices-regen menu_button interactable" tabindex="0" role="button">↻ Regenerate Suggestions</button>')
+        .on('click', async () => {
+            await clearChoicesForMessage(messageIndex);
+            $message.find('.st-choices-container').remove();
+            await generateSuggestions();
+        })
+        .appendTo($container);
+
+    $message.find('.mes_text').after($container);
+    console.log(`[${EXTENSION_NAME}] ✅ Rendered ${choices.length} choices on message ${messageIndex}`);
+}
+
+function renderFallbackButton(messageIndex) {
+    const $message = $(`.mes[mesid="${messageIndex}"]`);
+    if (!$message.length) {
+        console.error(`[${EXTENSION_NAME}] ❌ renderFallbackButton: could not find mesid=${messageIndex}`);
+        return;
+    }
+
+    // Remove any existing choices for this message
+    $message.find('.st-choices-container').remove();
+
+    const $container = $('<div class="st-choices-container"></div>');
+
+    // Fallback button for manual retry
+    $('<button class="st-choices-regen menu_button interactable" tabindex="0" role="button">⚡ Generate Suggestions</button>')
+        .on('click', async () => {
+            console.log(`[${EXTENSION_NAME}] ⚡ Fallback button clicked for message ${messageIndex}`);
+            $message.find('.st-choices-container').remove();
+            await generateSuggestions();
+        })
+        .appendTo($container);
+
+    $message.find('.mes_text').after($container);
+    console.log(`[${EXTENSION_NAME}] ✅ Rendered fallback button on message ${messageIndex}`);
+}
+
+async function restoreAllChoices() {
+    const { chatMetadata, saveMetadata } = SillyTavern.getContext();
+    const store = chatMetadata[STORAGE_KEY];
+
+    console.log(`[${EXTENSION_NAME}] 🔄 restoreAllChoices — store:`, store);
+
+    if (!store || !Object.keys(store).length) {
+        console.log(`[${EXTENSION_NAME}] No saved choices to restore`);
+        return;
+    }
+
+    let restored = 0;
+    let pruned = false;
+
+    for (const [indexStr, choices] of Object.entries(store)) {
+        const messageIndex = parseInt(indexStr, 10);
+        if (!Array.isArray(choices) || !choices.length) continue;
+
+        const found = await waitForMessageElement(messageIndex);
+        if (!found) {
+            console.warn(`[${EXTENSION_NAME}] ⚠ Pruning stale entry for mesid=${messageIndex}`);
+            delete store[indexStr];
+            pruned = true;
+            continue;
+        }
+
+        await renderSuggestions(choices, messageIndex, /* skipSave */ true);
+        restored++;
+    }
+
+    if (pruned) await saveMetadata();
+    console.log(`[${EXTENSION_NAME}] ✅ Restored ${restored} choice set(s)`);
+
+    // Check if last message needs fallback button
+    const { chat } = SillyTavern.getContext();
+    const lastIndex = chat.length - 1;
+    if (lastIndex >= 0 && !chat[lastIndex].is_user) {
+        const messageIndexStr = String(lastIndex);
+        const hasSavedChoices = store?.[messageIndexStr] && Array.isArray(store[messageIndexStr]) && store[messageIndexStr].length > 0;
+        const $lastMessage = $(`.mes[mesid="${lastIndex}"]`);
+        const hasContainer = $lastMessage.find('.st-choices-container').length > 0;
+
+        if (!hasSavedChoices && !hasContainer) {
+            console.log(`[${EXTENSION_NAME}] 🔄 Last AI message has no choices - rendering fallback`);
+            renderFallbackButton(lastIndex);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Click handler
+// ---------------------------------------------------------------------------
+
+async function handleChoiceClick(messageIndex, choiceText) {
+    await clearChoicesForMessage(messageIndex);
+
+    const prompt = getSettings().llm_prompt_impersonate
+        .replace('{{suggestionText}}', choiceText);
+
+    $('#send_textarea').val(prompt).trigger('input');
+    $('#send_but').trigger('click');
+}
+
+// ---------------------------------------------------------------------------
+// Generation
+// ---------------------------------------------------------------------------
+
+async function generateSuggestions() {
+    if (isGenerating) return;
+    isGenerating = true;
+
+    try {
+        const { chat, generateQuietPrompt } = SillyTavern.getContext();
+        const settings = getSettings();
+
+        if (!settings.enabled || !chat.length) return;
+
+        const quietPrompt = settings.llm_prompt
+            .replace('{{suggestionNumber}}', settings.num_responses);
+
+        // Object form: the positional form maps apply_wi_an -> skipWIAN
+        // (inverted) and response_length -> quietImage (ignored).
+        const response = await generateQuietPrompt({
+            quietPrompt,
+            quietToLoud: false,
+            skipWIAN: !settings.apply_wi_an,
+            responseLength: settings.response_length,
+        });
+
+        if (!response) {
+            console.warn(`[${EXTENSION_NAME}] ⚠ Empty response from generateQuietPrompt`);
+            renderFallbackButton(chat.length - 1);
+            return;
+        }
+
+        const choices = parseSuggestions(response);
+        console.log(`[${EXTENSION_NAME}] Parsed ${choices.length} suggestions:`, choices);
+        if (!choices.length) {
+            renderFallbackButton(chat.length - 1);
+            return;
+        }
+
+        await renderSuggestions(choices, chat.length - 1);
+    } catch (err) {
+        console.error(`[${EXTENSION_NAME}] ❌ generateSuggestions error:`, err);
+    } finally {
+        isGenerating = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
+
+function parseSuggestions(response) {
+    const strategies = [
+        // <suggestion_1>text</suggestion_1>
+        () => [...response.matchAll(/<suggestion_\d+>([\s\S]*?)<\/suggestion_\d+>/g)].map(m => m[1].trim()),
+        // <option_1>text</option_1> or <choice_1>text</choice_1>
+        () => [...response.matchAll(/<(?:option|choice)_\d+>([\s\S]*?)<\/(?:option|choice)_\d+>/g)].map(m => m[1].trim()),
+        // `text`  ← confirmed format used by this LLM
+        () => [...response.matchAll(/`([^`\n]+)`/g)].map(m => m[1].trim()),
+        // "text"  (quote-wrapped full lines)
+        () => [...response.matchAll(/^"([^"]+)"$/gm)].map(m => m[1].trim()),
+        // 1. text  or  1) text
+        () => [...response.matchAll(/^\d+[.)]\s+(.+)$/gm)].map(m => m[1].trim()),
+        // - text  or  * text
+        () => [...response.matchAll(/^[-*]\s+(.+)$/gm)].map(m => m[1].trim()),
+    ];
+
+    for (const strategy of strategies) {
+        try {
+            const results = strategy().filter(s => s.length > 0);
+            if (results.length) {
+                console.log(`[${EXTENSION_NAME}] Parsed suggestions:`, results);
+                return results;
+            }
+        } catch (_) { /* try next */ }
+    }
+
+    console.log(`[${EXTENSION_NAME}] Parsed suggestions: []`);
+    return [];
+}
+
+// ---------------------------------------------------------------------------
+// Settings UI
+// ---------------------------------------------------------------------------
+
+function renderSettings() {
+    const settings = getSettings();
+
+    const html = `
+        <div class="cyoa-settings">
+            <div class="inline-drawer">
+                <div class="inline-drawer-toggle inline-drawer-header">
+                    <b>${EXTENSION_NAME}</b>
+                    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                </div>
+                <div class="inline-drawer-content">
+                    <div class="cyoa-settings-content">
+                        <label class="checkbox_label">
+                            <input type="checkbox" id="${MODULE_NAME}_enabled" ${settings.enabled ? 'checked' : ''}>
+                            <span>Enable ${EXTENSION_NAME}</span>
+                        </label>
+                        <div class="cyoa-setting-group">
+                            <label for="${MODULE_NAME}_num_responses">
+                                Number of Suggestions: <span id="${MODULE_NAME}_num_responses_value">${settings.num_responses}</span>
+                            </label>
+                            <input type="range" id="${MODULE_NAME}_num_responses" min="1" max="5" value="${settings.num_responses}">
+                        </div>
+                        <div class="cyoa-setting-group">
+                            <label for="${MODULE_NAME}_llm_prompt">LLM Prompt:</label>
+                            <textarea id="${MODULE_NAME}_llm_prompt" rows="10">${settings.llm_prompt}</textarea>
+                        </div>
+                        <div class="cyoa-setting-group">
+                            <label for="${MODULE_NAME}_llm_prompt_impersonate">Impersonation Prompt:</label>
+                            <textarea id="${MODULE_NAME}_llm_prompt_impersonate" rows="5">${settings.llm_prompt_impersonate}</textarea>
+                        </div>
+                        <div class="cyoa-setting-group">
+                            <label class="checkbox_label">
+                                <input type="checkbox" id="${MODULE_NAME}_apply_wi_an" ${settings.apply_wi_an ? 'checked' : ''}>
+                                <span>Apply World Info / Author's Note</span>
+                            </label>
+                        </div>
+                        <div class="cyoa-setting-group">
+                            <label for="${MODULE_NAME}_response_length">
+                                Response Length: <span id="${MODULE_NAME}_response_length_value">${settings.response_length}</span>
+                            </label>
+                            <input type="range" id="${MODULE_NAME}_response_length" min="100" max="2000" step="50" value="${settings.response_length}">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    $('#extensions_settings').append(html);
+
+    $(`#${MODULE_NAME}_enabled`).on('change', function () {
+        getSettings().enabled = $(this).prop('checked');
+        saveSettings();
+    });
+    $(`#${MODULE_NAME}_num_responses`).on('input', function () {
+        getSettings().num_responses = parseInt($(this).val());
+        $(`#${MODULE_NAME}_num_responses_value`).text(getSettings().num_responses);
+        saveSettings();
+    });
+    $(`#${MODULE_NAME}_llm_prompt`).on('input', function () {
+        getSettings().llm_prompt = $(this).val();
+        saveSettings();
+    });
+    $(`#${MODULE_NAME}_llm_prompt_impersonate`).on('input', function () {
+        getSettings().llm_prompt_impersonate = $(this).val();
+        saveSettings();
+    });
+    $(`#${MODULE_NAME}_apply_wi_an`).on('change', function () {
+        getSettings().apply_wi_an = $(this).prop('checked');
+        saveSettings();
+    });
+    $(`#${MODULE_NAME}_response_length`).on('input', function () {
+        getSettings().response_length = parseInt($(this).val());
+        $(`#${MODULE_NAME}_response_length_value`).text(getSettings().response_length);
+        saveSettings();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Slash command
+// ---------------------------------------------------------------------------
+
+SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+    name: 'cyoa',
+    callback: () => { generateSuggestions(); return ''; },
+    helpString: 'Manually trigger CYOA story suggestions.',
+}));
+
+// ---------------------------------------------------------------------------
+// Initialization
+// ---------------------------------------------------------------------------
+
+$(document).ready(async function () {
+    console.log(`[${EXTENSION_NAME}] Initializing...`);
+
+    loadSettings();
+    renderSettings();
+
+    const { eventSource, eventTypes } = SillyTavern.getContext();
+
+    eventSource.on(eventTypes.GENERATION_STOPPED, () => { isGenerating = false; });
+    eventSource.on(eventTypes.GENERATION_ENDED,   () => { isGenerating = false; });
+
+    // CHAT_CHANGED: restore persisted choices. Fires before DOM is ready, so we poll.
+    eventSource.on(eventTypes.CHAT_CHANGED, () => {
+        console.log(`[${EXTENSION_NAME}] 🔔 CHAT_CHANGED`);
+        restoreAllChoices();
+    });
+
+    // CHARACTER_MESSAGE_RENDERED: fires after the AI message is in the DOM.
+    // Confirmed working: eventTypes.CHARACTER_MESSAGE_RENDERED = 'character_message_rendered'
+    eventSource.on(eventTypes.CHARACTER_MESSAGE_RENDERED, (messageIndex) => {
+        console.log(`[${EXTENSION_NAME}] 🔔 CHARACTER_MESSAGE_RENDERED index=${messageIndex}`);
+        generateSuggestions();
+    });
+
+    // KEY FIX: use USER_MESSAGE_RENDERED instead of GENERATION_STARTED.
+    //
+    // GENERATION_STARTED fires for ALL generations including our own generateQuietPrompt,
+    // which was deleting the choices we just saved before the chat could be written to disk.
+    //
+    // USER_MESSAGE_RENDERED only fires when the user sends a real message, so it correctly
+    // clears old choices only when the user has actually moved the story forward.
+    eventSource.on(eventTypes.USER_MESSAGE_RENDERED, async () => {
+        console.log(`[${EXTENSION_NAME}] 🔔 USER_MESSAGE_RENDERED — clearing old choices`);
+        const { chat } = SillyTavern.getContext();
+        $('.st-choices-container').remove();
+
+        // Walk back to find the last AI message before the one just sent
+        for (let i = chat.length - 1; i >= 0; i--) {
+            if (!chat[i].is_user) {
+                await clearChoicesForMessage(i);
+                break;
+            }
+        }
+    });
+
+    // MESSAGE_SWIPED: user is regenerating — old choices are stale
+    eventSource.on(eventTypes.MESSAGE_SWIPED, async (messageIndex) => {
+        console.log(`[${EXTENSION_NAME}] 🔔 MESSAGE_SWIPED index=${messageIndex}`);
+        $('.st-choices-container').remove();
+        await clearChoicesForMessage(messageIndex);
+    });
+
+    console.log(`[${EXTENSION_NAME}] ✅ Initialized`);
+});
