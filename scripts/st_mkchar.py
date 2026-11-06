@@ -26,7 +26,8 @@ It is deliberately narrow:
   * DETERMINISTIC STRUCTURE. The questionnaire order, the JSON schema sent to
     the model, and the validation afterwards are all fixed. The model supplies
     prose; it never supplies structure. Anything that is not valid v2 is
-    rejected and retried once, then reported — never written half-fixed.
+    rejected and re-asked with the reason quoted (up to `--max-attempts`),
+    then reported — never written half-fixed.
   * `--dry-run` writes a cleanly-structured card from the answers alone, with
     no network at all. The card is thinner (template prose instead of drafted
     prose) but still valid, which is what makes this script testable without
@@ -537,6 +538,58 @@ def extract_card_from_png(avatar: bytes) -> dict[str, Any]:
     raise CardError("no chara chunk in this PNG")
 
 
+def generate_card(
+    notes: dict[str, Any],
+    endpoint: str,
+    model: str,
+    api_key: str | None,
+    temperature: float,
+    max_attempts: int = 3,
+) -> dict[str, Any]:
+    """Ask the model for the draft, repairing rejections, up to max_attempts.
+
+    Two failure classes earn a targeted correction and another attempt:
+
+      * the reply is not one JSON object;
+      * the JSON parses but `build_card`/`validate_card` rejects it — the
+        live case is a model that returns FEWER alternate greetings than
+        asked (Lumimaid twice returned 1 for 2), or empty required prose.
+
+    The correction quotes the rejection reason, and the failed reply stays
+    in the history so the model can see what to fix. Anything else —
+    unreachable endpoint, HTTP error — raises immediately: retrying those
+    is waiting, not repairing.
+    """
+    if max_attempts < 1:
+        raise CardError("--max-attempts must be at least 1")
+    messages = build_prompt(notes)
+    last_error: CardError | None = None
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            _log(f"attempt {attempt}/{max_attempts}: re-asking after: {last_error}")
+        raw = post_chat_completions(endpoint, model, messages, api_key, temperature)
+        try:
+            drafted = coerce_json_object(raw)
+        except CardError as exc:
+            last_error = exc
+            messages = messages + [
+                {"role": "assistant", "content": raw},
+                {"role": "user", "content": "That was not one JSON object. Reply again with ONLY the JSON object, no fences, no commentary."},
+            ]
+            continue
+        try:
+            card = build_card(notes, drafted)
+            validate_card(card)
+            return card
+        except CardError as exc:
+            last_error = exc
+            messages = messages + [
+                {"role": "assistant", "content": raw},
+                {"role": "user", "content": f"That draft was rejected: {exc}. Reply again with ONLY the corrected JSON object, no fences, no commentary."},
+            ]
+    raise last_error or CardError("model produced no usable draft")
+
+
 # ── writing ───────────────────────────────────────────────────────────────────
 
 
@@ -604,6 +657,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                     help="File holding the bearer token (read at runtime, never env-visible)")
     ap.add_argument("--temperature", type=float, default=0.2,
                     help="Sampling temperature for the draft (default 0.2: steady prose)")
+    ap.add_argument("--max-attempts", type=int, default=3,
+                    help="Model calls before giving up; a rejected draft is re-asked with the reason quoted (default 3)")
     ap.add_argument("--non-interactive", action="store_true",
                     help="Never prompt; every answer must come from flags")
     ap.add_argument("--dry-run", action="store_true",
@@ -684,23 +739,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             _log("dry run: no model call, building from answers alone")
             drafted = draft_from_template(notes)
+            card = build_card(notes, drafted)
+            validate_card(card)
         else:
             api_key = read_api_key(args)
             _log(f"asking {args.model} at {args.endpoint} ...")
-            messages = build_prompt(notes)
-            raw = post_chat_completions(args.endpoint, args.model, messages, api_key, args.temperature)
-            try:
-                drafted = coerce_json_object(raw)
-            except CardError:
-                _log("first reply was not JSON; asking the model to repair it once")
-                repair = messages + [
-                    {"role": "assistant", "content": raw},
-                    {"role": "user", "content": "That was not one JSON object. Reply again with ONLY the JSON object, no fences, no commentary."},
-                ]
-                drafted = coerce_json_object(post_chat_completions(args.endpoint, args.model, repair, api_key, args.temperature))
-
-        card = build_card(notes, drafted)
-        validate_card(card)
+            card = generate_card(notes, args.endpoint, args.model, api_key, args.temperature, args.max_attempts)
 
         out = args.out or (safe_filename(notes["name"]) + ".json")
         write_card_file(card, out, args.force)

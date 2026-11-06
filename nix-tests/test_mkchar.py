@@ -199,6 +199,47 @@ class PromptTests(unittest.TestCase):
         self.assertIn("write frankly", spicy)
 
 
+class RepairLoopTests(unittest.TestCase):
+    def test_wrong_greeting_count_is_repaired_with_a_reask(self):
+        """The live Lumimaid case: 1 greeting returned for 2 asked."""
+        notes = _notes(alt_greetings_count=2)
+        bad = json.dumps(_drafted(n=1))
+        good = json.dumps(_drafted(n=2))
+        with mock.patch.object(mkchar, "post_chat_completions", side_effect=[bad, good]) as post:
+            card = mkchar.generate_card(notes, "http://x/v1", "m", None, 0.2, max_attempts=3)
+        self.assertEqual(len(card["data"]["alternate_greetings"]), 2)
+        self.assertEqual(post.call_count, 2)
+        # The correction quotes the rejection reason at the model.
+        repair_prompt = post.call_args[0][2][-1]["content"]
+        self.assertIn("alternate greetings", repair_prompt)
+
+    def test_non_json_then_valid_json_recovers(self):
+        notes = _notes()
+        with mock.patch.object(
+            mkchar, "post_chat_completions", side_effect=["not json", json.dumps(_drafted())]
+        ) as post:
+            card = mkchar.generate_card(notes, "http://x/v1", "m", None, 0.2, max_attempts=3)
+        self.assertEqual(card["data"]["name"], "Mara Voss")
+        self.assertEqual(post.call_count, 2)
+
+    def test_persistent_failure_raises_after_max_attempts(self):
+        notes = _notes(alt_greetings_count=2)
+        bad = json.dumps(_drafted(n=1))
+        with mock.patch.object(mkchar, "post_chat_completions", return_value=bad) as post:
+            with self.assertRaises(mkchar.CardError):
+                mkchar.generate_card(notes, "http://x/v1", "m", None, 0.2, max_attempts=2)
+        self.assertEqual(post.call_count, 2)
+
+    def test_network_errors_are_not_retried(self):
+        notes = _notes()
+        with mock.patch.object(
+            mkchar, "post_chat_completions", side_effect=mkchar.CardError("cannot reach x")
+        ) as post:
+            with self.assertRaises(mkchar.CardError):
+                mkchar.generate_card(notes, "http://x/v1", "m", None, 0.2, max_attempts=3)
+        self.assertEqual(post.call_count, 1)
+
+
 class EndpointTests(unittest.TestCase):
     def test_appends_chat_completions(self):
         self.assertEqual(
