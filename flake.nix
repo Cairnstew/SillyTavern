@@ -7,6 +7,7 @@
 #   nixosModules.sillytavern   the module
 #   homeModules.sillytavern   the Home Manager half
 #   packages.<system>.sillytavern
+#   packages.<system>.sillytavern-mkchar   the guided card generator CLI
 #   packages.<system>.default       the same package; what `nix flake check` builds
 #   overlays.default          adds pkgs.sillytavern
 #   lib                       the shared renderers
@@ -145,6 +146,10 @@
         in
         {
           sillytavern = (overlay pkgs pkgs).sillytavern;
+
+          # The guided character-card generator. Standalone (stdlib-only
+          # Python) so it builds in seconds and is usable without the server.
+          sillytavern-mkchar = pkgs.callPackage ./pkgs/sillytavern/mkchar.nix { };
 
           # `nix flake check` builds `packages.<system>.default` and NOTHING
           # else in `packages`. Without this attribute it built no package at

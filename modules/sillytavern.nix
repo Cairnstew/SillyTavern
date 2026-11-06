@@ -25,6 +25,7 @@
   imports = [
     ./options.nix
     ./config.nix
+    ./chargen.nix
     ./services.nix
     ./assertions.nix
   ];

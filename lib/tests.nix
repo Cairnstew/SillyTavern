@@ -662,6 +662,101 @@ rec {
         touch "$out"
       '';
 
+  # The card generator's own tests. No network, no model: `--dry-run` builds
+  # from answers alone, so the whole suite — v2 shape, questionnaire coverage,
+  # PNG round-trip, no-clobber writes — runs as a pure check.
+  mkchar =
+    pkgs:
+    pkgs.runCommand "sillytavern-check-mkchar"
+      {
+        nativeBuildInputs = [ pkgs.python3 ];
+      }
+      ''
+        cp -r ${../nix-tests} ./nix-tests
+        cp -r ${../scripts} ./scripts
+        chmod -R u+w ./nix-tests ./scripts
+        cd ./nix-tests
+        python3 test_mkchar.py
+        touch "$out"
+      '';
+
+  # The generator module: enabling it installs a wrapped `sillytavern-mkchar`
+  # whose endpoint defaults resolve in the documented precedence (explicit >
+  # llama.cpp router in the same system > Ollama default), and the CLI flags
+  # still override whatever was baked in.
+  charGenUnit =
+    pkgs:
+    let
+      enabled = evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          charGen.enable = true;
+        };
+      };
+      explicit = evalSystem pkgs {
+        services.sillytavern-nixos = {
+          enable = true;
+          charGen = {
+            enable = true;
+            endpoint = "http://models.lan:11434/v1";
+            model = "qwen2.5:14b";
+          };
+        };
+      };
+      withLlama = evalWith pkgs [
+        ../modules/llama.nix
+        modulePath
+        {
+          services.sillytavern-nixos = {
+            enable = true;
+            charGen.enable = true;
+          };
+          services.llama-cpp-nixos = {
+            enable = true;
+            models.test.weights.path = pkgs.writeText "gguf-stub" "stub";
+            models.test.primary = true;
+          };
+        }
+      ];
+      pkgNames = s: builtins.map (p: p.name or p.pname or "") s.config.environment.systemPackages;
+      hasMkchar = s: builtins.any (n: lib.hasPrefix "sillytavern-mkchar" n) (pkgNames s);
+      # The WRAPPED package on systemPackages, whose bin script carries the
+      # `wrapProgram --set-default` lines. Grepping it is what proves the
+      # endpoint precedence actually reached the binary.
+      wrappedOf = s: builtins.head (builtins.filter (p: lib.hasPrefix "sillytavern-mkchar" (p.name or "")) s.config.environment.systemPackages);
+    in
+    assert hasMkchar enabled;
+    assert !(hasMkchar (evalSystem pkgs { services.sillytavern-nixos.enable = true; }));
+    pkgs.runCommand "sillytavern-check-chargen-unit"
+      {
+        nativeBuildInputs = [ pkgs.gnugrep ];
+        enabledBin = "${wrappedOf enabled}/bin/sillytavern-mkchar";
+        explicitBin = "${wrappedOf explicit}/bin/sillytavern-mkchar";
+        llamaBin = "${wrappedOf withLlama}/bin/sillytavern-mkchar";
+      }
+      ''
+        fail() { echo "FAIL chargen-unit: $1" >&2; exit 1; }
+
+        # Default: no explicit endpoint, no llama backend -> Ollama default.
+        grep -q 'ST_CHARGEN_ENDPOINT.*http://127.0.0.1:11434/v1' "$enabledBin" \
+          || fail "default wrapper does not default to the Ollama endpoint"
+        grep -q 'ST_CHARGEN_MODEL.*llama3.1' "$enabledBin" \
+          || fail "default wrapper does not default the model"
+
+        # Explicit wins over everything.
+        grep -q 'ST_CHARGEN_ENDPOINT.*http://models.lan:11434/v1' "$explicitBin" \
+          || fail "explicit endpoint did not win"
+        grep -q 'ST_CHARGEN_MODEL.*qwen2.5:14b' "$explicitBin" \
+          || fail "explicit model did not win"
+
+        # The llama.cpp router in the same system is the fallback.
+        grep -q 'ST_CHARGEN_ENDPOINT.*http://127.0.0.1:9931/v1' "$llamaBin" \
+          || fail "llama.cpp router endpoint was not picked up"
+
+        echo "PASS chargen-unit (installed when enabled, absent when not, endpoint precedence holds)"
+        touch "$out"
+      '';
+
   # ── 6. Every guard actually FIRES ─────────────────────────────────────────
   #
   # This replaces a check that could not fail. It counted NIXOS'S OWN assertion
@@ -3830,6 +3925,8 @@ rec {
       assertionsDisabledCleanly = assertionsDisabledCleanly pkgs;
       noCrossModuleReads = noCrossModuleReads pkgs;
       seeder = seeder pkgs;
+      mkchar = mkchar pkgs;
+      charGenUnit = charGenUnit pkgs;
       systemdOverridesMerge = systemdOverridesMerge pkgs;
       wantedByIsSet = wantedByIsSet pkgs;
       perFilePolicyAndMode = perFilePolicyAndMode pkgs;

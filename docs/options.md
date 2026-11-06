@@ -20,6 +20,7 @@ For the per-account JSON surface — `settings.json`, presets, themes, world boo
 - [Served models: the llama.cpp backend](#served-models-the-llamacpp-backend)
 - [Served speech: the Breeze TTS backend](#served-speech-the-breeze-tts-backend)
 - [Model layers: settings that follow a model](#model-layers-settings-that-follow-a-model)
+- [Character cards: the generator CLI](#character-cards-the-generator-cli)
 - [What this module writes at the data root](#what-this-module-writes-at-the-data-root)
 - [Not Nix-configurable](#not-nix-configurable)
 
@@ -680,6 +681,33 @@ runs before a reload (`--reload-guard`), so a reload that no longer fits — for
 example because the LLM has taken the memory — returns 503 instead of loading
 anyway. The first request after idle is therefore both slower and subject to the
 same VRAM contract as startup.
+
+## Character cards: the generator CLI
+
+Characters live at `<dataRoot>/<handle>/characters/` as TavernCard v2
+PNG/JSON files, which the seeder deliberately never touches (they are the
+operator's own writing). `services.sillytavern-nixos.charGen.enable = true`
+puts `sillytavern-mkchar` on `PATH`: a guided questionnaire (concept, name,
+personality, scenario, speech, greeting seed, alt-greeting count, tags) whose
+answers a chat-completion endpoint expands into the long-form fields —
+`description`, `first_mes`, `mes_example`, alternate greetings — validated
+against the same v2 shape `src/validator/TavernCardValidator.js` enforces.
+
+```nix
+services.sillytavern-nixos.charGen = {
+  enable = true;
+  model = "qwen2.5:14b";   # sent as `model` in the completions request
+};
+```
+
+The endpoint defaults to the llama.cpp router in the same system when
+`services.llama-cpp-nixos.enable` is set, else the Ollama default
+`http://127.0.0.1:11434/v1`; `charGen.endpoint` — or `--endpoint` on the
+command line — wins over both. `--dry-run` skips the model entirely and
+builds a valid card from the answers alone, `--png avatar.png` embeds the
+card into a PNG (`tEXt` `chara`, the shape the import dialog reads), and
+`--to-data-root /var/lib/sillytavern --handle default-user` seeds it where
+the server reads characters from. Nothing is overwritten without `--force`.
 
 ## Model layers: settings that follow a model
 
