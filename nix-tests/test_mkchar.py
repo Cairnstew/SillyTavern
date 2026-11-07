@@ -198,6 +198,13 @@ class PromptTests(unittest.TestCase):
         self.assertIn("keep it clean", clean)
         self.assertIn("write frankly", spicy)
 
+    def test_schema_doc_spells_the_count_as_a_number(self):
+        """The old doc said "N alternate messages" — a literal letter N."""
+        doc = mkchar.schema_keys_doc(3)
+        self.assertIn("exactly 3 alternate opening messages", doc)
+        self.assertNotIn('"N ', doc)
+        self.assertIn("[]", mkchar.schema_keys_doc(0))
+
 
 class RepairLoopTests(unittest.TestCase):
     def test_wrong_greeting_count_is_repaired_with_a_reask(self):

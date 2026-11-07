@@ -256,17 +256,31 @@ def normalise_answers(answers: dict[str, str]) -> dict[str, Any]:
 # stated as literal keys so a model that "helpfully" renames one fails
 # validation instead of producing a card that looks right and imports wrong.
 
-SCHEMA_KEYS_DOC = """{
-  "description": "2-4 paragraphs, physical presence + backstory hooks, {{char}} / {{user}} macros allowed",
-  "personality": "one paragraph, traits as behaviour not adjectives-alone",
-  "scenario": "where the conversation starts and why {{user}} is there",
-  "first_mes": "the opening message, in character, 80-200 words",
-  "mes_example": "two short <START> delimited example exchanges, in character",
-  "alternate_greetings": ["N alternate opening messages, each a different situation"],
-  "system_prompt": "one paragraph of roleplay instructions, or empty string",
-  "post_history_instructions": "one short style nudge, or empty string",
-  "creator_notes": "one line on intended use, or empty string"
-}"""
+def schema_keys_doc(n: int) -> str:
+    """The schema doc with the greeting count spelled as a NUMBER, not "N".
+
+    The first version wrote `"alternate_greetings": ["N alternate opening
+    messages, ..."]` — a literal letter N — while the count lived two lines
+    above in prose ("Write EXACTLY 2..."). A model that skims the schema and
+    skips the prose has no usable count, and empty/wrong-length arrays are
+    what come back. The number now appears in both places.
+    """
+    greetings_doc = (
+        "[]" if n == 0 else f'["exactly {n} alternate opening messages, each a different situation"]'
+    )
+    return (
+        "{\n"
+        '  "description": "2-4 paragraphs, physical presence + backstory hooks, {{char}} / {{user}} macros allowed",\n'
+        '  "personality": "one paragraph, traits as behaviour not adjectives-alone",\n'
+        '  "scenario": "where the conversation starts and why {{user}} is there",\n'
+        '  "first_mes": "the opening message, in character, 80-200 words",\n'
+        '  "mes_example": "two short <START> delimited example exchanges, in character",\n'
+        f'  "alternate_greetings": {greetings_doc},\n'
+        '  "system_prompt": "one paragraph of roleplay instructions, or empty string",\n'
+        '  "post_history_instructions": "one short style nudge, or empty string",\n'
+        '  "creator_notes": "one line on intended use, or empty string"\n'
+        "}"
+    )
 
 
 def build_prompt(notes: dict[str, Any]) -> list[dict[str, str]]:
@@ -289,12 +303,21 @@ def build_prompt(notes: dict[str, Any]) -> list[dict[str, str]]:
         "Mature content: "
         + ("allowed, write frankly" if notes["nsfw_ok"] else "not wanted, keep it clean")
     )
+    n = notes["alt_greetings_count"]
+    greetings_rule = (
+        '"alternate_greetings" MUST be an empty array [].'
+        if n == 0
+        else f'"alternate_greetings" MUST be an array of EXACTLY {n} alternate greetings, each a non-empty string describing a different opening situation. Never empty, never a different length.'
+    )
     lines.extend(
         [
-            f"Write EXACTLY {notes['alt_greetings_count']} alternate greetings.",
+            "Rules:",
+            '- "description", "personality", "scenario", "first_mes" and "mes_example" MUST be non-empty strings.',
+            f"- {greetings_rule}",
+            '- "system_prompt", "post_history_instructions" and "creator_notes" may be "" but MUST still be present.',
             "Reply with ONE JSON object and nothing else — no fences, no commentary —",
             "with exactly these keys:",
-            SCHEMA_KEYS_DOC,
+            schema_keys_doc(n),
         ]
     )
     return [
