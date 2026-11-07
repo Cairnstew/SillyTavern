@@ -43,7 +43,9 @@ Typical use::
     st-mkchar --non-interactive --concept "a retired lighthouse keeper ..." \\
         --name "Mara Voss" --out ./Mara.json
     st-mkchar --dry-run --non-interactive --concept "..." --name Mara --out ./Mara.json
-    st-mkchar --out ./Mara.json --png ./mara-avatar.png
+    st-mkchar --out ./Mara.json            # also writes Mara.png (placeholder portrait)
+    st-mkchar --out ./Mara.json --png ./mara-avatar.png   # embed into real art instead
+    st-mkchar --out ./Mara.json --no-png                  # JSON only
     st-mkchar --to-data-root /var/lib/sillytavern --handle default-user --out ./Mara.json
 
 When the NixOS module enables this (`services.sillytavern-nixos.charGen`),
@@ -509,8 +511,57 @@ def validate_card(card: dict[str, Any]) -> None:
 # `chara` holds the base64 card JSON. `Pillow` would do this in one call, but
 # it is not on PATH in the wrapper — so this re-implements the 30 lines that
 # matter: verify the signature, splice one chunk before IEND, recompute CRCs.
+#
+# The same stdlib-only constraint applies to the placeholder avatar below:
+# no image library, so the encoder writes raw RGB scanlines (filter 0) and
+# lets zlib do the work. Gradients compress well; a 384x576 card lands
+# around 100-200 KB.
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def make_placeholder_avatar(name: str, width: int = 384, height: int = 576) -> bytes:
+    """A deterministic stand-in avatar: vertical gradient + ring emblem.
+
+    The hue comes from sha256(name), so every character gets its own colours
+    and re-runs are byte-identical. This is what a PNG card carries when the
+    operator has no art yet (`--png` supplies real art instead); it reads as
+    an intentional "no portrait" badge rather than a broken image.
+    """
+    import colorsys
+    import hashlib
+
+    hue = (int(hashlib.sha256(name.encode("utf-8")).hexdigest()[:8], 16) % 360) / 360.0
+    top = colorsys.hsv_to_rgb(hue, 0.45, 0.34)
+    bottom = colorsys.hsv_to_rgb((hue + 0.08) % 1.0, 0.55, 0.10)
+
+    # Ring emblem: thin circle centred just above middle, moon-like.
+    cx, cy = width / 2, height * 0.42
+    radius = min(width, height) * 0.22
+    ring_lo, ring_hi = radius - 3, radius + 3
+
+    rows = bytearray()
+    for y in range(height):
+        t = y / max(height - 1, 1)
+        r = int((top[0] + (bottom[0] - top[0]) * t) * 255)
+        g = int((top[1] + (bottom[1] - top[1]) * t) * 255)
+        b = int((top[2] + (bottom[2] - top[2]) * t) * 255)
+        row = bytearray(b"\x00")
+        for x in range(width):
+            dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+            if ring_lo <= dist <= ring_hi:
+                row += b"\xff\xff\xff"
+            else:
+                row += bytes((r, g, b))
+        rows += row
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        PNG_SIGNATURE
+        + png_chunk(b"IHDR", ihdr)
+        + png_chunk(b"IDAT", zlib.compress(bytes(rows), 6))
+        + png_chunk(b"IEND", b"")
+    )
 
 
 def png_chunk(chunk_type: bytes, data: bytes) -> bytes:
@@ -701,7 +752,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument("--out", default="",
                     help="Write the v2 JSON card here (default: <Name>.json in cwd)")
     ap.add_argument("--png", default="",
-                    help="Avatar PNG to embed the card into; writes <stem>.png beside --out")
+                    help="Avatar PNG to embed the card into (default: generate a placeholder avatar); writes <stem>.png beside --out")
+    ap.add_argument("--no-png", action="store_true",
+                    help="Skip the PNG card; write only the JSON")
     ap.add_argument("--to-data-root", default="",
                     help="Also seed into a server data root (uses --handle for the account dir)")
     ap.add_argument("--handle", default="default-user",
@@ -773,9 +826,13 @@ def main(argv: list[str] | None = None) -> int:
         write_card_file(card, out, args.force)
 
         png_bytes: bytes | None = None
-        if args.png:
-            with open(args.png, "rb") as fh:
-                avatar = fh.read()
+        if not args.no_png:
+            if args.png:
+                with open(args.png, "rb") as fh:
+                    avatar = fh.read()
+            else:
+                _log("no avatar supplied; generating a placeholder portrait")
+                avatar = make_placeholder_avatar(notes["name"])
             png_bytes = embed_card_in_png(card, avatar)
             png_out = os.path.join(
                 os.path.dirname(os.path.abspath(out)) or ".",

@@ -284,6 +284,34 @@ class PngTests(unittest.TestCase):
         with self.assertRaises(mkchar.CardError):
             mkchar.extract_card_from_png(_tiny_png())
 
+    def test_placeholder_is_deterministic_per_name(self):
+        self.assertEqual(mkchar.make_placeholder_avatar("Mae"), mkchar.make_placeholder_avatar("Mae"))
+        self.assertNotEqual(mkchar.make_placeholder_avatar("Mae"), mkchar.make_placeholder_avatar("Mara"))
+
+    def test_placeholder_is_a_real_png_that_round_trips(self):
+        card = mkchar.build_card(_notes(), _drafted())
+        avatar = mkchar.make_placeholder_avatar("Mae")
+        self.assertTrue(avatar.startswith(b"\x89PNG\r\n\x1a\n"))
+        embedded = mkchar.embed_card_in_png(card, avatar)
+        self.assertEqual(mkchar.extract_card_from_png(embedded)["data"]["name"], "Mara Voss")
+
+    def test_main_writes_png_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "card.json")
+            rc = mkchar.main(["--dry-run", "--non-interactive", "--concept", "c", "--name", "Mae", "--out", out])
+            self.assertEqual(rc, 0)
+            png = os.path.join(tmp, "card.png")
+            self.assertTrue(os.path.exists(png))
+            mkchar.validate_card(mkchar.extract_card_from_png(Path(png).read_bytes()))
+
+    def test_main_no_png_skips_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "card.json")
+            rc = mkchar.main(["--dry-run", "--non-interactive", "--concept", "c", "--name", "Mae",
+                              "--out", out, "--no-png"])
+            self.assertEqual(rc, 0)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "card.png")))
+
 
 class WritingTests(unittest.TestCase):
     def test_out_refuses_to_clobber_without_force(self):

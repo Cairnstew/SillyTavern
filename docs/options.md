@@ -703,11 +703,13 @@ services.sillytavern-nixos.charGen = {
 The endpoint defaults to the llama.cpp router in the same system when
 `services.llama-cpp-nixos.enable` is set, else the Ollama default
 `http://127.0.0.1:11434/v1`; `charGen.endpoint` — or `--endpoint` on the
-command line — wins over both. `--dry-run` skips the model entirely and
-builds a valid card from the answers alone, `--png avatar.png` embeds the
-card into a PNG (`tEXt` `chara`, the shape the import dialog reads), and
-`--to-data-root /var/lib/sillytavern --handle default-user` seeds it where
-the server reads characters from. Nothing is overwritten without `--force`.
+command line — wins over both. It writes `<Name>.json` plus `<Name>.png` — the PNG card SillyTavern imports,
+with the card embedded as `tEXt` `chara`. The portrait is a generated
+placeholder unless `--png avatar.png` supplies real art (`--no-png` for
+JSON only). `--dry-run` skips the model entirely and builds a valid card
+from the answers alone, and `--to-data-root /var/lib/sillytavern
+--handle default-user` seeds it where the server reads characters from.
+Nothing is overwritten without `--force`.
 
 ## Model layers: settings that follow a model
 
